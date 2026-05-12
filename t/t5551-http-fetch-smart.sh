@@ -7,6 +7,13 @@ export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-httpd.sh
+
+if ! test_have_prereq PERL_TEST_HELPERS
+then
+	skip_all='skipping http fetch smart tests; Perl not available'
+	test_done
+fi
+
 test "$HTTP_PROTO" = "HTTP/2" && enable_http2
 start_httpd
 
@@ -181,9 +188,31 @@ test_expect_success 'clone from password-protected repository' '
 	echo two >expect &&
 	set_askpass user@host pass@host &&
 	git clone --bare "$HTTPD_URL/auth/smart/repo.git" smart-auth &&
-	expect_askpass both user@host &&
+	expect_askpass both user%40host &&
 	git --git-dir=smart-auth log -1 --format=%s >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success 'credential.interactive=false skips askpass' '
+	set_askpass bogus nonsense &&
+	(
+		GIT_TRACE2_EVENT="$(pwd)/interactive-true" &&
+		export GIT_TRACE2_EVENT &&
+		test_must_fail git clone --bare "$HTTPD_URL/auth/smart/repo.git" interactive-true-dir &&
+		test_region credential interactive interactive-true &&
+
+		GIT_TRACE2_EVENT="$(pwd)/interactive-false" &&
+		export GIT_TRACE2_EVENT &&
+		test_must_fail git -c credential.interactive=false \
+			clone --bare "$HTTPD_URL/auth/smart/repo.git" interactive-false-dir &&
+		test_region ! credential interactive interactive-false &&
+
+		GIT_TRACE2_EVENT="$(pwd)/interactive-never" &&
+		export GIT_TRACE2_EVENT &&
+		test_must_fail git -c credential.interactive=never \
+			clone --bare "$HTTPD_URL/auth/smart/repo.git" interactive-never-dir &&
+		test_region ! credential interactive interactive-never
+	)
 '
 
 test_expect_success 'clone from auth-only-for-push repository' '
@@ -199,7 +228,7 @@ test_expect_success 'clone from auth-only-for-objects repository' '
 	echo two >expect &&
 	set_askpass user@host pass@host &&
 	git clone --bare "$HTTPD_URL/auth-fetch/smart/repo.git" half-auth &&
-	expect_askpass both user@host &&
+	expect_askpass both user%40host &&
 	git --git-dir=half-auth log -1 --format=%s >actual &&
 	test_cmp expect actual
 '
@@ -224,14 +253,14 @@ test_expect_success 'redirects send auth to new location' '
 	set_askpass user@host pass@host &&
 	git -c credential.useHttpPath=true \
 	  clone $HTTPD_URL/smart-redir-auth/repo.git repo-redir-auth &&
-	expect_askpass both user@host auth/smart/repo.git
+	expect_askpass both user%40host auth/smart/repo.git
 '
 
 test_expect_success 'GIT_TRACE_CURL redacts auth details' '
 	rm -rf redact-auth trace &&
 	set_askpass user@host pass@host &&
 	GIT_TRACE_CURL="$(pwd)/trace" git clone --bare "$HTTPD_URL/auth/smart/repo.git" redact-auth &&
-	expect_askpass both user@host &&
+	expect_askpass both user%40host &&
 
 	# Ensure that there is no "Basic" followed by a base64 string, but that
 	# the auth details are redacted
@@ -243,7 +272,7 @@ test_expect_success 'GIT_CURL_VERBOSE redacts auth details' '
 	rm -rf redact-auth trace &&
 	set_askpass user@host pass@host &&
 	GIT_CURL_VERBOSE=1 git clone --bare "$HTTPD_URL/auth/smart/repo.git" redact-auth 2>trace &&
-	expect_askpass both user@host &&
+	expect_askpass both user%40host &&
 
 	# Ensure that there is no "Basic" followed by a base64 string, but that
 	# the auth details are redacted
@@ -256,7 +285,7 @@ test_expect_success 'GIT_TRACE_CURL does not redact auth details if GIT_TRACE_RE
 	set_askpass user@host pass@host &&
 	GIT_TRACE_REDACT=0 GIT_TRACE_CURL="$(pwd)/trace" \
 		git clone --bare "$HTTPD_URL/auth/smart/repo.git" redact-auth &&
-	expect_askpass both user@host &&
+	expect_askpass both user%40host &&
 
 	grep -i "Authorization: Basic [0-9a-zA-Z+/]" trace
 '
@@ -304,12 +333,12 @@ test_expect_success 'dumb clone via http-backend respects namespace' '
 
 test_expect_success 'cookies stored in http.cookiefile when http.savecookies set' '
 	cat >cookies.txt <<-\EOF &&
-	127.0.0.1	FALSE	/smart_cookies/	FALSE	0	othername	othervalue
+	127.0.0.1	FALSE	/smart_cookies	FALSE	0	othername	othervalue
 	EOF
 	sort >expect_cookies.txt <<-\EOF &&
-	127.0.0.1	FALSE	/smart_cookies/	FALSE	0	othername	othervalue
-	127.0.0.1	FALSE	/smart_cookies/repo.git/	FALSE	0	name	value
-	127.0.0.1	FALSE	/smart_cookies/repo.git/info/	FALSE	0	name	value
+	127.0.0.1	FALSE	/smart_cookies	FALSE	0	othername	othervalue
+	127.0.0.1	FALSE	/smart_cookies/repo.git	FALSE	0	name	value
+	127.0.0.1	FALSE	/smart_cookies/repo.git/info	FALSE	0	name	value
 	EOF
 	git config http.cookiefile cookies.txt &&
 	git config http.savecookies true &&
@@ -322,8 +351,11 @@ test_expect_success 'cookies stored in http.cookiefile when http.savecookies set
 		tag -m "foo" cookie-tag &&
 	git fetch $HTTPD_URL/smart_cookies/repo.git cookie-tag &&
 
-	grep "^[^#]" cookies.txt | sort >cookies_stripped.txt &&
-	test_cmp expect_cookies.txt cookies_stripped.txt
+	# Strip trailing slashes from cookie paths to handle output from both
+	# old curl ("/smart_cookies/") and new ("/smart_cookies").
+	HT="	" &&
+	grep "^[^#]" cookies.txt | sed "s,/$HT,$HT," | sort >cookies_clean.txt &&
+	test_cmp expect_cookies.txt cookies_clean.txt
 '
 
 test_expect_success 'transfer.hiderefs works over smart-http' '
@@ -449,6 +481,7 @@ test_expect_success 'test allowanysha1inwant with unreachable' '
 '
 
 test_expect_success EXPENSIVE 'http can handle enormous ref negotiation' '
+	test_when_finished "rm -f tags" &&
 	(
 		cd "$HTTPD_DOCUMENT_ROOT_PATH/repo.git" &&
 		create_tags 2001 50000
@@ -570,7 +603,7 @@ test_expect_success 'http auth remembers successful credentials' '
 	# the first request prompts the user...
 	set_askpass user@host pass@host &&
 	git ls-remote "$HTTPD_URL/auth/smart/repo.git" >/dev/null &&
-	expect_askpass both user@host &&
+	expect_askpass both user%40host &&
 
 	# ...and the second one uses the stored value rather than
 	# prompting the user.
@@ -601,7 +634,7 @@ test_expect_success 'http auth forgets bogus credentials' '
 	# us to prompt the user again.
 	set_askpass user@host pass@host &&
 	git ls-remote "$HTTPD_URL/auth/smart/repo.git" >/dev/null &&
-	expect_askpass both user@host
+	expect_askpass both user%40host
 '
 
 test_expect_success 'client falls back from v2 to v0 to match server' '
@@ -748,6 +781,13 @@ test_expect_success 'tag following always works over v0 http' '
 	git -C "$upstream" for-each-ref refs/tags >expect &&
 	git -C tags for-each-ref >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success 'ls-remote outside repo does not segfault with fetch refspec' '
+	nongit git \
+		-c remote.origin.url="$HTTPD_URL/smart/repo.git" \
+		-c remote.origin.fetch=anything \
+		ls-remote origin
 '
 
 test_done

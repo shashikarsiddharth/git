@@ -21,7 +21,6 @@ In the test, these paths are used:
 	yomin   - not in H or M
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-read-tree.sh
 
@@ -363,7 +362,7 @@ test_expect_success 'a/b (untracked) vs a case setup.' '
 test_expect_success 'a/b (untracked) vs a, plus c/d case test.' '
 	read_tree_u_must_fail -u -m "$treeH" "$treeM" &&
 	git ls-files --stage &&
-	test -f a/b
+	test_path_is_file a/b
 '
 
 test_expect_success 'read-tree supports the super-prefix' '

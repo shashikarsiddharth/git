@@ -25,11 +25,11 @@ int try_merge_command(struct repository *r,
 		      const char *head_arg, struct commit_list *remotes)
 {
 	struct child_process cmd = CHILD_PROCESS_INIT;
-	int i, ret;
+	int ret;
 	struct commit_list *j;
 
 	strvec_pushf(&cmd.args, "merge-%s", strategy);
-	for (i = 0; i < xopts_nr; i++)
+	for (size_t i = 0; i < xopts_nr; i++)
 		strvec_pushf(&cmd.args, "--%s", xopts[i]);
 	for (j = common; j; j = j->next)
 		strvec_push(&cmd.args, merge_argument(j->item));
@@ -68,18 +68,18 @@ int checkout_fast_forward(struct repository *r,
 	memset(&trees, 0, sizeof(trees));
 	memset(&t, 0, sizeof(t));
 
-	trees[nr_trees] = parse_tree_indirect(head);
+	trees[nr_trees] = repo_parse_tree_indirect(the_repository, head);
 	if (!trees[nr_trees++]) {
 		rollback_lock_file(&lock_file);
 		return -1;
 	}
-	trees[nr_trees] = parse_tree_indirect(remote);
+	trees[nr_trees] = repo_parse_tree_indirect(the_repository, remote);
 	if (!trees[nr_trees++]) {
 		rollback_lock_file(&lock_file);
 		return -1;
 	}
 	for (i = 0; i < nr_trees; i++) {
-		if (parse_tree(trees[i]) < 0) {
+		if (repo_parse_tree(the_repository, trees[i]) < 0) {
 			rollback_lock_file(&lock_file);
 			return -1;
 		}

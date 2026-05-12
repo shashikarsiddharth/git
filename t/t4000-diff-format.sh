@@ -10,7 +10,6 @@ same command line parser, so testing one should be sufficient; pick
 diff-files as a representative.
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-diff.sh
 
@@ -37,7 +36,7 @@ test_expect_success 'git diff-files -p after editing work tree.' '
 # that's as far as it comes
 if [ "$(git config --get core.filemode)" = false ]
 then
-	say 'filemode disabled on the filesystem'
+	skip_all='filemode disabled on the filesystem'
 	test_done
 fi
 

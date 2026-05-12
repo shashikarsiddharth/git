@@ -4,6 +4,7 @@
 #include "commit.h"
 #include "grep.h"
 #include "notes.h"
+#include "object-name.h"
 #include "oidset.h"
 #include "pretty.h"
 #include "diff.h"
@@ -52,7 +53,9 @@
 #define NOT_USER_GIVEN	(1u<<25)
 #define TRACK_LINEAR	(1u<<26)
 #define ANCESTRY_PATH	(1u<<27)
-#define ALL_REV_FLAGS	(((1u<<11)-1) | NOT_USER_GIVEN | TRACK_LINEAR | PULL_MERGE)
+#define CHILD_VISITED	(1u<<28)
+#define ALL_REV_FLAGS	(((1u<<11)-1) | NOT_USER_GIVEN | TRACK_LINEAR \
+				      | PULL_MERGE | CHILD_VISITED)
 
 #define DECORATE_SHORT_REFS	1
 #define DECORATE_FULL_REFS	2
@@ -62,7 +65,7 @@ struct repository;
 struct rev_info;
 struct string_list;
 struct saved_parents;
-struct bloom_key;
+struct bloom_keyvec;
 struct bloom_filter_settings;
 struct option;
 struct parse_opt_ctx_t;
@@ -160,8 +163,6 @@ struct rev_info {
 	/* topo-sort */
 	enum rev_sort_order sort_order;
 
-	unsigned int early_output;
-
 	unsigned int	ignore_missing:1,
 			ignore_missing_links:1;
 
@@ -191,6 +192,7 @@ struct rev_info {
 			left_right:1,
 			left_only:1,
 			right_only:1,
+			maximal_only:1,
 			rewrite_parents:1,
 			print_parents:1,
 			show_decorations:1,
@@ -292,7 +294,6 @@ struct rev_info {
 	struct string_list *ref_message_ids;
 	int		add_signoff;
 	const char	*extra_headers;
-	const char	*log_reencode;
 	const char	*subject_prefix;
 	int		patch_name_max;
 	int		no_inline;
@@ -337,6 +338,7 @@ struct rev_info {
 	/* range-diff */
 	const char *rdiff1;
 	const char *rdiff2;
+	struct strvec rdiff_log_arg;
 	int creation_factor;
 	const char *rdiff_title;
 
@@ -361,8 +363,8 @@ struct rev_info {
 
 	/* Commit graph bloom filter fields */
 	/* The bloom filter key(s) for the pathspec */
-	struct bloom_key *bloom_keys;
-	int bloom_keys_nr;
+	struct bloom_keyvec **bloom_keyvecs;
+	int bloom_keyvecs_nr;
 
 	/*
 	 * The bloom filter settings used to generate the key.
@@ -413,6 +415,7 @@ struct rev_info {
 	.expand_tabs_in_log = -1, \
 	.commit_format = CMIT_FMT_DEFAULT, \
 	.expand_tabs_in_log_default = 8, \
+	.rdiff_log_arg = STRVEC_INIT, \
 }
 
 /**
@@ -444,6 +447,8 @@ struct setup_revision_opt {
 };
 int setup_revisions(int argc, const char **argv, struct rev_info *revs,
 		    struct setup_revision_opt *);
+void setup_revisions_from_strvec(struct strvec *argv, struct rev_info *revs,
+				 struct setup_revision_opt *);
 
 /**
  * Free data allocated in a "struct rev_info" after it's been
@@ -488,8 +493,6 @@ void put_revision_mark(const struct rev_info *revs,
 void mark_parents_uninteresting(struct rev_info *revs, struct commit *commit);
 void mark_tree_uninteresting(struct repository *r, struct tree *tree);
 void mark_trees_uninteresting_sparse(struct repository *r, struct oidset *trees);
-
-void show_object_with_name(FILE *, struct object *, const char *);
 
 /**
  * Helpers to check if a reference should be excluded.
@@ -549,17 +552,11 @@ int rewrite_parents(struct rev_info *revs,
  * The log machinery saves the original parent list so that
  * get_saved_parents() can later tell what the real parents of the
  * commits are, when commit->parents has been modified by history
- * simpification.
+ * simplification.
  *
  * get_saved_parents() will transparently return commit->parents if
  * history simplification is off.
  */
 struct commit_list *get_saved_parents(struct rev_info *revs, const struct commit *commit);
-
-/**
- * Global for the (undocumented) "--early-output" flag for "git log".
- */
-typedef void (*show_early_output_fn_t)(struct rev_info *, struct commit_list *);
-extern volatile show_early_output_fn_t show_early_output;
 
 #endif

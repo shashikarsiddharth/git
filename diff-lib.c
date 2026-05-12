@@ -3,6 +3,7 @@
  */
 
 #define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
 #include "commit.h"
@@ -114,6 +115,9 @@ void run_diff_files(struct rev_info *revs, unsigned int option)
 	uint64_t start = getnanotime();
 	struct index_state *istate = revs->diffopt.repo->index;
 
+	if (revs->diffopt.max_depth_valid)
+		die(_("max-depth is not supported for worktree diffs"));
+
 	diff_set_mnemonic_prefix(&revs->diffopt, "i/", "w/");
 
 	refresh_fsmonitor(istate);
@@ -152,20 +156,7 @@ void run_diff_files(struct rev_info *revs, unsigned int option)
 			struct diff_filepair *pair;
 			unsigned int wt_mode = 0;
 			int num_compare_stages = 0;
-			size_t path_len;
 			struct stat st;
-
-			path_len = ce_namelen(ce);
-
-			dpath = xmalloc(combine_diff_path_size(5, path_len));
-			dpath->path = (char *) &(dpath->parent[5]);
-
-			dpath->next = NULL;
-			memcpy(dpath->path, ce->name, path_len);
-			dpath->path[path_len] = '\0';
-			oidclr(&dpath->oid, the_repository->hash_algo);
-			memset(&(dpath->parent[0]), 0,
-			       sizeof(struct combine_diff_parent)*5);
 
 			changed = check_removed(ce, &st);
 			if (!changed)
@@ -177,7 +168,14 @@ void run_diff_files(struct rev_info *revs, unsigned int option)
 				}
 				wt_mode = 0;
 			}
-			dpath->mode = wt_mode;
+
+			/*
+			 * Allocate space for two parents, which will come from
+			 * index stages #2 and #3, if present. Below we'll fill
+			 * these from (stage - 2).
+			 */
+			dpath = combine_diff_path_new(ce->name, ce_namelen(ce),
+						      wt_mode, null_oid(the_hash_algo), 2);
 
 			while (i < entries) {
 				struct cache_entry *nce = istate->cache[i];
@@ -228,8 +226,12 @@ void run_diff_files(struct rev_info *revs, unsigned int option)
 				continue;
 		}
 
-		if (ce_uptodate(ce) || ce_skip_worktree(ce))
+		if (ce_uptodate(ce) || ce_skip_worktree(ce)) {
+			if (revs->diffopt.flags.find_copies_harder)
+				diff_same(&revs->diffopt, ce->ce_mode,
+					  &ce->oid, ce->name);
 			continue;
+		}
 
 		/*
 		 * When CE_VALID is set (via "update-index --assume-unchanged"
@@ -262,7 +264,7 @@ void run_diff_files(struct rev_info *revs, unsigned int option)
 				   ce_intent_to_add(ce)) {
 				newmode = ce_mode_from_stat(ce, st.st_mode);
 				diff_addremove(&revs->diffopt, '+', newmode,
-					       null_oid(), 0, ce->name, 0);
+					       null_oid(the_hash_algo), 0, ce->name, 0);
 				continue;
 			}
 
@@ -274,12 +276,14 @@ void run_diff_files(struct rev_info *revs, unsigned int option)
 		if (!changed && !dirty_submodule) {
 			ce_mark_uptodate(ce);
 			mark_fsmonitor_valid(istate, ce);
-			if (!revs->diffopt.flags.find_copies_harder)
-				continue;
+			if (revs->diffopt.flags.find_copies_harder)
+				diff_same(&revs->diffopt, newmode,
+					  &ce->oid, ce->name);
+			continue;
 		}
 		oldmode = ce->ce_mode;
 		old_oid = &ce->oid;
-		new_oid = changed ? null_oid() : &ce->oid;
+		new_oid = changed ? null_oid(the_hash_algo) : &ce->oid;
 		diff_change(&revs->diffopt, oldmode, newmode,
 			    old_oid, new_oid,
 			    !is_null_oid(old_oid),
@@ -335,7 +339,7 @@ static int get_stat_data(const struct cache_entry *ce,
 						    0, dirty_submodule);
 		if (changed) {
 			mode = ce_mode_from_stat(ce, st.st_mode);
-			oid = null_oid();
+			oid = null_oid(the_hash_algo);
 		}
 	}
 
@@ -404,16 +408,10 @@ static int show_modified(struct rev_info *revs,
 	if (revs->combine_merges && !cached &&
 	    (!oideq(oid, &old_entry->oid) || !oideq(&old_entry->oid, &new_entry->oid))) {
 		struct combine_diff_path *p;
-		int pathlen = ce_namelen(new_entry);
 
-		p = xmalloc(combine_diff_path_size(2, pathlen));
-		p->path = (char *) &p->parent[2];
-		p->next = NULL;
-		memcpy(p->path, new_entry->name, pathlen);
-		p->path[pathlen] = 0;
-		p->mode = mode;
-		oidclr(&p->oid, the_repository->hash_algo);
-		memset(p->parent, 0, 2 * sizeof(struct combine_diff_parent));
+		p = combine_diff_path_new(new_entry->name,
+					  ce_namelen(new_entry),
+					  mode, null_oid(the_hash_algo), 2);
 		p->parent[0].status = DIFF_STATUS_MODIFIED;
 		p->parent[0].mode = new_entry->ce_mode;
 		oidcpy(&p->parent[0].oid, &new_entry->oid);
@@ -426,13 +424,12 @@ static int show_modified(struct rev_info *revs,
 	}
 
 	oldmode = old_entry->ce_mode;
-	if (mode == oldmode && oideq(oid, &old_entry->oid) && !dirty_submodule &&
-	    !revs->diffopt.flags.find_copies_harder)
-		return 0;
-
-	diff_change(&revs->diffopt, oldmode, mode,
-		    &old_entry->oid, oid, 1, !is_null_oid(oid),
-		    old_entry->name, 0, dirty_submodule);
+	if (mode != oldmode || !oideq(oid, &old_entry->oid) || dirty_submodule)
+		diff_change(&revs->diffopt, oldmode, mode,
+			    &old_entry->oid, oid, 1, !is_null_oid(oid),
+			    old_entry->name, 0, dirty_submodule);
+	else if (revs->diffopt.flags.find_copies_harder)
+		diff_same(&revs->diffopt, mode, oid, old_entry->name);
 	return 0;
 }
 
@@ -555,7 +552,7 @@ static int diff_cache(struct rev_info *revs,
 	struct tree_desc t;
 	struct unpack_trees_options opts;
 
-	tree = parse_tree_indirect(tree_oid);
+	tree = repo_parse_tree_indirect(the_repository, tree_oid);
 	if (!tree)
 		return error("bad tree object %s",
 			     tree_name ? tree_name : oid_to_hex(tree_oid));
@@ -571,6 +568,8 @@ static int diff_cache(struct rev_info *revs,
 	opts.dst_index = NULL;
 	opts.pathspec = &revs->diffopt.pathspec;
 	opts.pathspec->recursive = 1;
+	if (revs->diffopt.max_depth_valid)
+		die(_("max-depth is not supported for index diffs"));
 
 	init_tree_desc(&t, &tree->object.oid, tree->buffer, tree->size);
 	return unpack_trees(1, &t, &opts);
@@ -616,7 +615,7 @@ void diff_get_merge_base(const struct rev_info *revs, struct object_id *mb)
 
 	oidcpy(mb, &merge_bases->item->object.oid);
 
-	free_commit_list(merge_bases);
+	commit_list_free(merge_bases);
 }
 
 void run_diff_index(struct rev_info *revs, unsigned int option)
@@ -661,6 +660,7 @@ int do_diff_cache(const struct object_id *tree_oid, struct diff_options *opt)
 
 	repo_init_revisions(opt->repo, &revs, NULL);
 	copy_pathspec(&revs.prune_data, &opt->pathspec);
+	diff_free(&revs.diffopt);
 	revs.diffopt = *opt;
 	revs.diffopt.no_free = 1;
 
@@ -701,7 +701,7 @@ int index_differs_from(struct repository *r,
 	return (has_changes != 0);
 }
 
-static struct strbuf *idiff_prefix_cb(struct diff_options *opt UNUSED, void *data)
+static const char *idiff_prefix_cb(struct diff_options *opt UNUSED, void *data)
 {
 	return data;
 }
@@ -716,7 +716,7 @@ void show_interdiff(const struct object_id *oid1, const struct object_id *oid2,
 	opts.output_format = DIFF_FORMAT_PATCH;
 	opts.output_prefix = idiff_prefix_cb;
 	strbuf_addchars(&prefix, ' ', indent);
-	opts.output_prefix_data = &prefix;
+	opts.output_prefix_data = prefix.buf;
 	diff_setup_done(&opts);
 
 	diff_tree_oid(oid1, oid2, "", &opts);

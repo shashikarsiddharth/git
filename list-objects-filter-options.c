@@ -20,6 +20,8 @@ const char *list_object_filter_config_name(enum list_objects_filter_choice c)
 	case LOFC_DISABLED:
 		/* we have no name for "no filter at all" */
 		break;
+	case LOFC_AUTO:
+		return "auto";
 	case LOFC_BLOB_NONE:
 		return "blob:none";
 	case LOFC_BLOB_LIMIT:
@@ -52,7 +54,16 @@ int gently_parse_list_objects_filter(
 	if (filter_options->choice)
 		BUG("filter_options already populated");
 
-	if (!strcmp(arg, "blob:none")) {
+	if (!strcmp(arg, "auto")) {
+		if (!filter_options->allow_auto_filter) {
+			strbuf_addstr(errbuf,
+				      _("'auto' filter not supported by this command"));
+			return 1;
+		}
+		filter_options->choice = LOFC_AUTO;
+		return 0;
+
+	} else if (!strcmp(arg, "blob:none")) {
 		filter_options->choice = LOFC_BLOB_NONE;
 		return 0;
 
@@ -114,9 +125,9 @@ int gently_parse_list_objects_filter(
 static const char *RESERVED_NON_WS = "~`!@#$^&*()[]{}\\;'\",<>?";
 
 static int has_reserved_character(
-	struct strbuf *sub_spec, struct strbuf *errbuf)
+	const char *sub_spec, struct strbuf *errbuf)
 {
-	const char *c = sub_spec->buf;
+	const char *c = sub_spec;
 	while (*c) {
 		if (*c <= ' ' || strchr(RESERVED_NON_WS, *c)) {
 			strbuf_addf(
@@ -133,7 +144,7 @@ static int has_reserved_character(
 
 static int parse_combine_subfilter(
 	struct list_objects_filter_options *filter_options,
-	struct strbuf *subspec,
+	const char *subspec,
 	struct strbuf *errbuf)
 {
 	size_t new_index = filter_options->sub_nr;
@@ -144,12 +155,24 @@ static int parse_combine_subfilter(
 		      filter_options->sub_alloc);
 	list_objects_filter_init(&filter_options->sub[new_index]);
 
-	decoded = url_percent_decode(subspec->buf);
+	decoded = url_percent_decode(subspec);
 
-	result = has_reserved_character(subspec, errbuf) ||
-		gently_parse_list_objects_filter(
+	result = has_reserved_character(subspec, errbuf);
+	if (result)
+		goto cleanup;
+
+	result = gently_parse_list_objects_filter(
 			&filter_options->sub[new_index], decoded, errbuf);
+	if (result)
+		goto cleanup;
 
+	result = (filter_options->sub[new_index].choice == LOFC_AUTO);
+	if (result) {
+		strbuf_addstr(errbuf, _("an 'auto' filter cannot be combined"));
+		goto cleanup;
+	}
+
+cleanup:
 	free(decoded);
 	return result;
 }
@@ -159,34 +182,34 @@ static int parse_combine_filter(
 	const char *arg,
 	struct strbuf *errbuf)
 {
-	struct strbuf **subspecs = strbuf_split_str(arg, '+', 0);
-	size_t sub;
+	const char *p = arg;
+	struct strbuf sub = STRBUF_INIT;
 	int result = 0;
 
-	if (!subspecs[0]) {
+	if (!*p) {
 		strbuf_addstr(errbuf, _("expected something after combine:"));
 		result = 1;
 		goto cleanup;
 	}
 
-	for (sub = 0; subspecs[sub] && !result; sub++) {
-		if (subspecs[sub + 1]) {
-			/*
-			 * This is not the last subspec. Remove trailing "+" so
-			 * we can parse it.
-			 */
-			size_t last = subspecs[sub]->len - 1;
-			assert(subspecs[sub]->buf[last] == '+');
-			strbuf_remove(subspecs[sub], last, 1);
-		}
-		result = parse_combine_subfilter(
-			filter_options, subspecs[sub], errbuf);
+	while (*p && !result) {
+		const char *end = strchrnul(p, '+');
+
+		strbuf_reset(&sub);
+		strbuf_add(&sub, p, end - p);
+
+		if (sub.len)
+			result = parse_combine_subfilter(filter_options, sub.buf, errbuf);
+
+		if (!*end)
+			break;
+		p = end + 1;
 	}
+	strbuf_release(&sub);
 
 	filter_options->choice = LOFC_COMBINE;
 
 cleanup:
-	strbuf_list_free(subspecs);
 	if (result)
 		list_objects_filter_release(filter_options);
 	return result;
@@ -252,18 +275,19 @@ void parse_list_objects_filter(
 	const char *arg)
 {
 	struct strbuf errbuf = STRBUF_INIT;
-	int parse_error;
 
 	if (!filter_options->filter_spec.buf)
 		BUG("filter_options not properly initialized");
 
 	if (!filter_options->choice) {
+		if (gently_parse_list_objects_filter(filter_options, arg, &errbuf))
+			die("%s", errbuf.buf);
 		strbuf_addstr(&filter_options->filter_spec, arg);
-
-		parse_error = gently_parse_list_objects_filter(
-			filter_options, arg, &errbuf);
 	} else {
 		struct list_objects_filter_options *sub;
+
+		if (filter_options->choice == LOFC_AUTO)
+			die(_("an 'auto' filter is incompatible with any other filter"));
 
 		/*
 		 * Make filter_options an LOFC_COMBINE spec so we can trivially
@@ -271,18 +295,20 @@ void parse_list_objects_filter(
 		 */
 		transform_to_combine_type(filter_options);
 
-		strbuf_addch(&filter_options->filter_spec, '+');
-		filter_spec_append_urlencode(filter_options, arg);
 		ALLOC_GROW_BY(filter_options->sub, filter_options->sub_nr, 1,
 			      filter_options->sub_alloc);
 		sub = &filter_options->sub[filter_options->sub_nr - 1];
 
 		list_objects_filter_init(sub);
-		parse_error = gently_parse_list_objects_filter(sub, arg,
-							       &errbuf);
+		if (gently_parse_list_objects_filter(sub, arg, &errbuf))
+			die("%s", errbuf.buf);
+
+		if (sub->choice == LOFC_AUTO)
+			die(_("an 'auto' filter is incompatible with any other filter"));
+
+		strbuf_addch(&filter_options->filter_spec, '+');
+		filter_spec_append_urlencode(filter_options, arg);
 	}
-	if (parse_error)
-		die("%s", errbuf.buf);
 }
 
 int opt_parse_list_objects_filter(const struct option *opt,
@@ -320,15 +346,19 @@ void list_objects_filter_release(
 	struct list_objects_filter_options *filter_options)
 {
 	size_t sub;
+	unsigned int allow_auto_filter;
 
 	if (!filter_options)
 		return;
+
+	allow_auto_filter = filter_options->allow_auto_filter;
 	strbuf_release(&filter_options->filter_spec);
 	free(filter_options->sparse_oid_name);
 	for (sub = 0; sub < filter_options->sub_nr; sub++)
 		list_objects_filter_release(&filter_options->sub[sub]);
 	free(filter_options->sub);
 	list_objects_filter_init(filter_options);
+	filter_options->allow_auto_filter = allow_auto_filter;
 }
 
 void partial_clone_register(
@@ -353,7 +383,7 @@ void partial_clone_register(
 
 		/* Add promisor config for the remote */
 		cfg_name = xstrfmt("remote.%s.promisor", remote);
-		git_config_set(cfg_name, "true");
+		repo_config_set(the_repository, cfg_name, "true");
 		free(cfg_name);
 	}
 
@@ -363,8 +393,8 @@ void partial_clone_register(
 	 */
 	filter_name = xstrfmt("remote.%s.partialclonefilter", remote);
 	/* NEEDSWORK: 'expand' result leaking??? */
-	git_config_set(filter_name,
-		       expand_list_objects_filter_spec(filter_options));
+	repo_config_set(the_repository, filter_name,
+			expand_list_objects_filter_spec(filter_options));
 	free(filter_name);
 
 	/* Make sure the config info are reset */
@@ -397,8 +427,6 @@ void list_objects_filter_copy(
 	struct list_objects_filter_options *dest,
 	const struct list_objects_filter_options *src)
 {
-	int i;
-
 	/* Copy everything. We will overwrite the pointers shortly. */
 	memcpy(dest, src, sizeof(struct list_objects_filter_options));
 
@@ -407,7 +435,7 @@ void list_objects_filter_copy(
 	dest->sparse_oid_name = xstrdup_or_null(src->sparse_oid_name);
 
 	ALLOC_ARRAY(dest->sub, dest->sub_alloc);
-	for (i = 0; i < src->sub_nr; i++)
+	for (size_t i = 0; i < src->sub_nr; i++)
 		list_objects_filter_copy(&dest->sub[i], &src->sub[i]);
 }
 

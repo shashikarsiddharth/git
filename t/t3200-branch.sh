@@ -8,7 +8,6 @@ test_description='git branch assorted tests'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-rebase.sh
 
@@ -409,6 +408,20 @@ test_expect_success 'bare main worktree has HEAD at branch deleted by secondary 
 	git clone --bare nonbare bare &&
 	git -C bare worktree add --detach ../secondary main &&
 	git -C secondary branch -D main
+'
+
+test_expect_success 'secondary worktrees recognize core.bare=true in main config.worktree' '
+	test_when_finished "rm -rf bare_repo non_bare_repo secondary_worktree" &&
+	git init -b main non_bare_repo &&
+	test_commit -C non_bare_repo x &&
+
+	git clone --bare non_bare_repo bare_repo &&
+	git -C bare_repo config extensions.worktreeConfig true &&
+	git -C bare_repo config unset core.bare &&
+	git -C bare_repo config --worktree core.bare true &&
+
+	git -C bare_repo worktree add ../secondary_worktree &&
+	git -C secondary_worktree checkout main
 '
 
 test_expect_success 'git branch --list -v with --abbrev' '
@@ -1481,7 +1494,8 @@ test_expect_success 'refuse --edit-description on unborn branch for now' '
 '
 
 test_expect_success '--merged catches invalid object names' '
-	test_must_fail git branch --merged 0000000000000000000000000000000000000000
+	test_must_fail git branch --merged $ZERO_OID 2>err &&
+	test_grep "must point to a commit" err
 '
 
 test_expect_success '--list during rebase' '
@@ -1694,10 +1708,10 @@ test_expect_success '--track overrides branch.autoSetupMerge' '
 '
 
 test_expect_success 'errors if given a bad branch name' '
-	cat <<-\EOF >expect &&
-	fatal: '\''foo..bar'\'' is not a valid branch name
-	hint: See `man git check-ref-format`
-	hint: Disable this message with "git config advice.refSyntax false"
+	cat <<-EOF >expect &&
+	fatal: ${SQ}foo..bar${SQ} is not a valid branch name
+	hint: See ${SQ}git help check-ref-format${SQ}
+	hint: Disable this message with "git config set advice.refSyntax false"
 	EOF
 	test_must_fail git branch foo..bar >actual 2>&1 &&
 	test_cmp expect actual

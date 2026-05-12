@@ -51,6 +51,12 @@ void strbuf_repo_add_unique_abbrev(struct strbuf *sb, struct repository *repo,
 void strbuf_add_unique_abbrev(struct strbuf *sb, const struct object_id *oid,
 			      int abbrev_len);
 
+/*
+ * This is like "get_oid_basic()", except it allows "object ID expressions",
+ * notably "xyz^" for "parent of xyz". Accepts GET_OID_* flags.
+ */
+int repo_get_oid_with_flags(struct repository *r, const char *str,
+			    struct object_id *oid, unsigned flags);
 int repo_get_oid(struct repository *r, const char *str, struct object_id *oid);
 __attribute__((format (printf, 2, 3)))
 int get_oidf(struct object_id *oid, const char *fmt, ...);
@@ -95,9 +101,12 @@ int set_disambiguate_hint_config(const char *var, const char *value);
  * If the input was ok but there are not N branch switches in the
  * reflog, it returns 0.
  */
-#define INTERPRET_BRANCH_LOCAL (1<<0)
-#define INTERPRET_BRANCH_REMOTE (1<<1)
-#define INTERPRET_BRANCH_HEAD (1<<2)
+enum interpret_branch_kind {
+	INTERPRET_BRANCH_LOCAL = (1 << 0),
+	INTERPRET_BRANCH_REMOTE = (1 << 1),
+	INTERPRET_BRANCH_HEAD = (1 << 2),
+};
+
 struct interpret_branch_name_options {
 	/*
 	 * If "allowed" is non-zero, it is a treated as a bitfield of allowable
@@ -105,7 +114,7 @@ struct interpret_branch_name_options {
 	 * ("refs/remotes/"), or "HEAD". If no "allowed" bits are set, any expansion is
 	 * allowed, even ones to refs outside of those namespaces.
 	 */
-	unsigned allowed;
+	enum interpret_branch_kind allowed;
 
 	/*
 	 * If ^{upstream} or ^{push} (or equivalent) is requested, and the

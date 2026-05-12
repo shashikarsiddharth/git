@@ -2,7 +2,6 @@
 
 test_description='git mv in subdirs'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-diff-data.sh
 
@@ -549,6 +548,34 @@ test_expect_success 'moving nested submodules' '
 	git submodule update --init --recursive &&
 	git mv nested_move sub_nested_moved &&
 	git status
+'
+
+test_expect_success 'moving file and its parent directory at the same time fails' '
+	test_when_finished git reset --hard HEAD &&
+	git reset --hard HEAD &&
+	mkdir -p a &&
+	mkdir -p b &&
+	>a/a.txt &&
+	git add a/a.txt &&
+	cat >expect <<-EOF &&
+	fatal: cannot move both ${SQ}a/a.txt${SQ} and its parent directory ${SQ}a${SQ}
+	EOF
+	test_must_fail git mv a/a.txt a b 2>err &&
+	test_cmp expect err
+'
+
+test_expect_success 'moving nested directory and its parent directory at the same time fails' '
+	test_when_finished git reset --hard HEAD &&
+	git reset --hard HEAD &&
+	mkdir -p a/b/c &&
+	>a/b/c/file.txt &&
+	git add a &&
+	mkdir target &&
+	cat >expect <<-EOF &&
+	fatal: cannot move both ${SQ}a/b/c${SQ} and its parent directory ${SQ}a${SQ}
+	EOF
+	test_must_fail git mv a/b/c a target 2>err &&
+	test_cmp expect err
 '
 
 test_done

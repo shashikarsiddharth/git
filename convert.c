@@ -1,4 +1,5 @@
 #define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
 #include "advice.h"
@@ -7,7 +8,7 @@
 #include "copy.h"
 #include "gettext.h"
 #include "hex.h"
-#include "object-store-ll.h"
+#include "object-file.h"
 #include "attr.h"
 #include "run-command.h"
 #include "quote.h"
@@ -1121,7 +1122,8 @@ static int count_ident(const char *cp, unsigned long size)
 static int ident_to_git(const char *src, size_t len,
 			struct strbuf *buf, int ident)
 {
-	char *dst, *dollar;
+	char *dst;
+	const char *dollar;
 
 	if (!ident || (src && !count_ident(src, len)))
 		return 0;
@@ -1166,7 +1168,8 @@ static int ident_to_worktree(const char *src, size_t len,
 			     struct strbuf *buf, int ident)
 {
 	struct object_id oid;
-	char *to_free = NULL, *dollar, *spc;
+	char *to_free = NULL;
+	const char *dollar, *spc;
 	int cnt;
 
 	if (!ident)
@@ -1325,7 +1328,7 @@ void convert_attrs(struct index_state *istate,
 					 "eol", "text", "working-tree-encoding",
 					 NULL);
 		user_convert_tail = &user_convert;
-		git_config(read_convert_config, NULL);
+		repo_config(the_repository, read_convert_config, NULL);
 	}
 
 	git_check_attr(istate, path, check);

@@ -6,9 +6,7 @@ test_description="recursive merge corner cases w/ renames but not criss-crosses"
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
-. "$TEST_DIRECTORY"/lib-merge.sh
 
 test_setup_rename_delete_untracked () {
 	git init rename-delete-untracked &&
@@ -317,12 +315,7 @@ test_expect_success 'rename/directory conflict + clean content merge' '
 		git ls-files -u >out &&
 		test_line_count = 1 out &&
 		git ls-files -o >out &&
-		if test "$GIT_TEST_MERGE_ALGORITHM" = ort
-		then
-			test_line_count = 1 out
-		else
-			test_line_count = 2 out
-		fi &&
+		test_line_count = 1 out &&
 
 		echo 0 >expect &&
 		git cat-file -p base:file >>expect &&
@@ -351,12 +344,7 @@ test_expect_success 'rename/directory conflict + content merge conflict' '
 		git ls-files -u >out &&
 		test_line_count = 3 out &&
 		git ls-files -o >out &&
-		if test "$GIT_TEST_MERGE_ALGORITHM" = ort
-		then
-			test_line_count = 1 out
-		else
-			test_line_count = 2 out
-		fi &&
+		test_line_count = 1 out &&
 
 		git cat-file -p left-conflict:newfile >left &&
 		git cat-file -p base:file    >base &&
@@ -370,14 +358,8 @@ test_expect_success 'rename/directory conflict + content merge conflict' '
 
 		git rev-parse >expect   \
 			base:file       left-conflict:newfile right:file &&
-		if test "$GIT_TEST_MERGE_ALGORITHM" = ort
-		then
-			git rev-parse >actual \
-				:1:newfile~HEAD :2:newfile~HEAD :3:newfile~HEAD
-		else
-			git rev-parse >actual \
-				:1:newfile      :2:newfile      :3:newfile
-		fi &&
+		git rev-parse >actual \
+			:1:newfile~HEAD :2:newfile~HEAD :3:newfile~HEAD &&
 		test_cmp expect actual &&
 
 		test_path_is_file newfile/realfile &&
@@ -897,7 +879,7 @@ test_setup_rad () {
 	)
 }
 
-test_expect_merge_algorithm failure success 'rad-check: rename/add/delete conflict' '
+test_expect_success 'rad-check: rename/add/delete conflict' '
 	test_setup_rad &&
 	(
 		cd rad &&
@@ -970,7 +952,7 @@ test_setup_rrdd () {
 	)
 }
 
-test_expect_merge_algorithm failure success 'rrdd-check: rename/rename(2to1)/delete/delete conflict' '
+test_expect_success 'rrdd-check: rename/rename(2to1)/delete/delete conflict' '
 	test_setup_rrdd &&
 	(
 		cd rrdd &&
@@ -1059,7 +1041,7 @@ test_setup_mod6 () {
 	)
 }
 
-test_expect_merge_algorithm failure success 'mod6-check: chains of rename/rename(1to2) and rename/rename(2to1)' '
+test_expect_success 'mod6-check: chains of rename/rename(1to2) and rename/rename(2to1)' '
 	test_setup_mod6 &&
 	(
 		cd mod6 &&
@@ -1164,10 +1146,7 @@ test_conflicts_with_adds_and_renames() {
 			cd simple_${sideL}_${sideR} &&
 
 			# Create some related files now
-			for i in $(test_seq 1 10)
-			do
-				echo Random base content line $i
-			done >file_v1 &&
+			test_seq -f "Random base content line %d" 1 10 >file_v1 &&
 			cp file_v1 file_v2 &&
 			echo modification >>file_v2 &&
 
@@ -1311,10 +1290,7 @@ test_setup_nested_conflicts_from_rename_rename () {
 		cd nested_conflicts_from_rename_rename &&
 
 		# Create some related files now
-		for i in $(test_seq 1 10)
-		do
-			echo Random base content line $i
-		done >file_v1 &&
+		test_seq -f "Random base content line %d" 1 10 >file_v1 &&
 
 		cp file_v1 file_v2 &&
 		cp file_v1 file_v3 &&
@@ -1459,6 +1435,92 @@ test_expect_success 'rename/rename(1to2) with a binary file' '
 
 		git rev-parse A:orig-A B:orig-B >expect &&
 		git hash-object orig-A orig-B >actual &&
+		test_cmp expect actual
+	)
+'
+
+# Testcase preliminary submodule/directory conflict and submodule rename
+#   Commit O: <empty, or additional irrelevant stuff>
+#   Commit A1: introduce "folder" (as a tree)
+#   Commit B1: introduce "folder" (as a submodule)
+#   Commit A2: merge B1 into A1, but keep folder as a tree
+#   Commit B2: merge A1 into B1, but keep folder as a submodule
+#   Merge A2 & B2
+test_setup_submodule_directory_preliminary_conflict () {
+	git init submodule_directory_preliminary_conflict &&
+	(
+		cd submodule_directory_preliminary_conflict &&
+
+		# Trying to do the A2 and B2 merges above is slightly more
+		# challenging with a local submodule (because checking out
+		# another commit has the submodule in the way).  Instead,
+		# first create the commits with the wrong parents but right
+		# trees, in the order A1, A2, B1, B2...
+		#
+		# Then go back and create new A2 & B2 with the correct
+		# parents and the same trees.
+
+		git commit --allow-empty -m orig &&
+
+		git branch A &&
+		git branch B &&
+
+		git checkout B &&
+		mkdir folder &&
+		echo A>folder/A &&
+		echo B>folder/B &&
+		echo C>folder/C &&
+		echo D>folder/D &&
+		echo E>folder/E &&
+		git add folder &&
+		git commit -m B1 &&
+
+		git commit --allow-empty -m B2 &&
+
+		git checkout A &&
+		git init folder &&
+		(
+			cd folder &&
+			>Z &&
+			>Y &&
+			git add Z Y &&
+			git commit -m "original submodule commit"
+		) &&
+		git add folder &&
+		git commit -m A1 &&
+
+		git commit --allow-empty -m A2 &&
+
+		NewA2=$(git commit-tree -p A^ -p B^ -m "Merge B into A" A^{tree}) &&
+		NewB2=$(git commit-tree -p B^ -p A^ -m "Merge A into B" B^{tree}) &&
+		git update-ref refs/heads/A $NewA2 &&
+		git update-ref refs/heads/B $NewB2
+	)
+}
+
+test_expect_success 'submodule/directory preliminary conflict' '
+	test_setup_submodule_directory_preliminary_conflict &&
+	(
+		cd submodule_directory_preliminary_conflict &&
+
+		git checkout A^0 &&
+
+		test_expect_code 1 git merge B^0 &&
+
+		# Make sure the index has the right number of entries
+		git ls-files -s >actual &&
+		test_line_count = 2 actual &&
+
+		# The "folder" as directory should have been resolved away
+		# as part of the merge.  The "folder" as submodule got
+		# renamed to "folder~Temporary merge branch 2" in the
+		# virtual merge base, resulting in a
+		#    "folder~Temporary merge branch 2" -> "folder"
+		# rename in the outermerge for the submodule, which then
+		# becomes part of a rename/delete conflict (because "folder"
+		# as a submodule was deleted in A2).
+		submod=$(git rev-parse A:folder) &&
+		printf "160000 $submod 1\tfolder\n160000 $submod 2\tfolder\n" >expect &&
 		test_cmp expect actual
 	)
 '

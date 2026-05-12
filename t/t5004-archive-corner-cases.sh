@@ -2,8 +2,13 @@
 
 test_description='test corner cases of git-archive'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
+
+if ! test_have_prereq PERL_TEST_HELPERS
+then
+	skip_all='skipping archive corner cases tests; Perl not available'
+	test_done
+fi
 
 # the 10knuls.tar file is used to test for an empty git generated tar
 # without having to invoke tar because an otherwise valid empty GNU tar
@@ -171,11 +176,7 @@ test_expect_success EXPENSIVE,UNZIP,UNZIP_ZIP64_SUPPORT \
 	blob=$(echo $s | git hash-object -w --stdin) &&
 
 	# create tree containing 65500 entries of that blob
-	for i in $(test_seq 1 65500)
-	do
-		echo "100644 blob $blob	$i" || return 1
-	done >tree &&
-	tree=$(git mktree <tree) &&
+	tree=$(test_seq -f "100644 blob $blob\t%d" 1 65500 | git mktree) &&
 
 	# zip it, creating an archive a bit bigger than 4GB
 	git archive -0 -o many-big.zip $tree &&

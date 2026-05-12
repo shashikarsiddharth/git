@@ -5,7 +5,6 @@ test_description='git am running'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup: messages' '
@@ -1085,13 +1084,13 @@ test_expect_success 'am works with multi-line in-body headers' '
     Body test" --author="$LONG <long@example.com>" &&
 	git format-patch --stdout -1 >patch &&
 	# bump from, date, and subject down to in-body header
-	perl -lpe "
-		if (/^From:/) {
-			print \"From: x <x\@example.com>\";
+	awk "
+		/^From:/{
+			print \"From: x <x@example.com>\";
 			print \"Date: Sat, 1 Jan 2000 00:00:00 +0000\";
 			print \"Subject: x\n\";
-		}
-	" patch >msg &&
+		}; 1
+	" <patch >msg &&
 	git checkout HEAD^ &&
 	git am msg &&
 	# Ensure that the author and full message are present

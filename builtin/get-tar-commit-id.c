@@ -12,7 +12,10 @@ static const char builtin_get_tar_commit_id_usage[] =
 #define RECORDSIZE	(512)
 #define HEADERSIZE (2 * RECORDSIZE)
 
-int cmd_get_tar_commit_id(int argc, const char **argv UNUSED, const char *prefix)
+int cmd_get_tar_commit_id(int argc,
+			  const char **argv,
+			  const char *prefix,
+			  struct repository *repo UNUSED)
 {
 	char buffer[HEADERSIZE];
 	struct ustar_header *header = (struct ustar_header *)buffer;
@@ -23,6 +26,8 @@ int cmd_get_tar_commit_id(int argc, const char **argv UNUSED, const char *prefix
 	char *end;
 
 	BUG_ON_NON_EMPTY_PREFIX(prefix);
+
+	show_usage_if_asked(argc, argv, builtin_get_tar_commit_id_usage);
 
 	if (argc != 1)
 		usage(builtin_get_tar_commit_id_usage);

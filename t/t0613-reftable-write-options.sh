@@ -11,17 +11,18 @@ export GIT_TEST_REFTABLE_AUTOCOMPACTION
 # Block sizes depend on the hash function, so we force SHA1 here.
 GIT_TEST_DEFAULT_HASH=sha1
 export GIT_TEST_DEFAULT_HASH
-# Block sizes also depend on the actual refs we write, so we force "master" to
-# be the default initial branch name.
-GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=master
-export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
+
+# Block sizes depend on the actual refs we write, so, for tests
+# that check block size, we force the initial branch name to be "master".
+init_repo () {
+	git init --initial-branch master repo
+}
 
 test_expect_success 'default write options' '
 	test_when_finished "rm -rf repo" &&
-	git init repo &&
+	init_repo &&
 	(
 		cd repo &&
 		test_commit initial &&
@@ -44,7 +45,7 @@ test_expect_success 'default write options' '
 test_expect_success 'disabled reflog writes no log blocks' '
 	test_config_global core.logAllRefUpdates false &&
 	test_when_finished "rm -rf repo" &&
-	git init repo &&
+	init_repo &&
 	(
 		cd repo &&
 		test_commit initial &&
@@ -63,16 +64,12 @@ test_expect_success 'disabled reflog writes no log blocks' '
 
 test_expect_success 'many refs results in multiple blocks' '
 	test_when_finished "rm -rf repo" &&
-	git init repo &&
+	init_repo &&
 	(
 		cd repo &&
 		test_commit initial &&
-		for i in $(test_seq 200)
-		do
-			printf "update refs/heads/branch-%d HEAD\n" "$i" ||
-			return 1
-		done >input &&
-		git update-ref --stdin <input &&
+		test_seq -f "update refs/heads/branch-%d HEAD" 200 |
+		git update-ref --stdin &&
 		git pack-refs &&
 
 		cat >expect <<-EOF &&
@@ -94,6 +91,9 @@ test_expect_success 'many refs results in multiple blocks' '
 		    restarts: 3
 		  - length: 3289
 		    restarts: 3
+		idx:
+		  - length: 103
+		    restarts: 1
 		EOF
 		test-tool dump-reftable -b .git/reftable/*.ref >actual &&
 		test_cmp expect actual
@@ -117,7 +117,7 @@ test_expect_success 'tiny block size leads to error' '
 test_expect_success 'small block size leads to multiple ref blocks' '
 	test_config_global core.logAllRefUpdates false &&
 	test_when_finished "rm -rf repo" &&
-	git init repo &&
+	init_repo &&
 	(
 		cd repo &&
 		test_commit A &&
@@ -146,7 +146,7 @@ test_expect_success 'small block size fails with large reflog message' '
 	(
 		cd repo &&
 		test_commit A &&
-		perl -e "print \"a\" x 500" >logmsg &&
+		test-tool genzeros 500 | tr "\000" "a" >logmsg &&
 		cat >expect <<-EOF &&
 		fatal: update_ref failed for ref ${SQ}refs/heads/logme${SQ}: reftable: transaction failure: entry too large
 		EOF
@@ -174,16 +174,12 @@ test_expect_success 'block size exceeding maximum supported size' '
 
 test_expect_success 'restart interval at every single record' '
 	test_when_finished "rm -rf repo" &&
-	git init repo &&
+	init_repo &&
 	(
 		cd repo &&
 		test_commit initial &&
-		for i in $(test_seq 10)
-		do
-			printf "update refs/heads/branch-%d HEAD\n" "$i" ||
-			return 1
-		done >input &&
-		git update-ref --stdin <input &&
+		test_seq -f "update refs/heads/branch-%d HEAD" 10 |
+		git update-ref --stdin &&
 		git -c reftable.restartInterval=1 pack-refs &&
 
 		cat >expect <<-EOF &&
@@ -218,16 +214,12 @@ test_expect_success 'restart interval exceeding maximum supported interval' '
 test_expect_success 'object index gets written by default with ref index' '
 	test_config_global core.logAllRefUpdates false &&
 	test_when_finished "rm -rf repo" &&
-	git init repo &&
+	init_repo &&
 	(
 		cd repo &&
 		test_commit initial &&
-		for i in $(test_seq 5)
-		do
-			printf "update refs/heads/branch-%d HEAD\n" "$i" ||
-			return 1
-		done >input &&
-		git update-ref --stdin <input &&
+		test_seq -f "update refs/heads/branch-%d HEAD" 5 |
+		git update-ref --stdin &&
 		git -c reftable.blockSize=100 pack-refs &&
 
 		cat >expect <<-EOF &&
@@ -242,6 +234,9 @@ test_expect_success 'object index gets written by default with ref index' '
 		    restarts: 1
 		  - length: 80
 		    restarts: 1
+		idx:
+		  - length: 55
+		    restarts: 2
 		obj:
 		  - length: 11
 		    restarts: 1
@@ -254,16 +249,12 @@ test_expect_success 'object index gets written by default with ref index' '
 test_expect_success 'object index can be disabled' '
 	test_config_global core.logAllRefUpdates false &&
 	test_when_finished "rm -rf repo" &&
-	git init repo &&
+	init_repo &&
 	(
 		cd repo &&
 		test_commit initial &&
-		for i in $(test_seq 5)
-		do
-			printf "update refs/heads/branch-%d HEAD\n" "$i" ||
-			return 1
-		done >input &&
-		git update-ref --stdin <input &&
+		test_seq -f "update refs/heads/branch-%d HEAD" 5 |
+		git update-ref --stdin &&
 		git -c reftable.blockSize=100 -c reftable.indexObjects=false pack-refs &&
 
 		cat >expect <<-EOF &&
@@ -278,6 +269,9 @@ test_expect_success 'object index can be disabled' '
 		    restarts: 1
 		  - length: 80
 		    restarts: 1
+		idx:
+		  - length: 55
+		    restarts: 2
 		EOF
 		test-tool dump-reftable -b .git/reftable/*.ref >actual &&
 		test_cmp expect actual

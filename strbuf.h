@@ -356,6 +356,7 @@ void strbuf_expand_bad_format(const char *format, const char *command);
 void strbuf_addbuf_percentquote(struct strbuf *dst, const struct strbuf *src);
 
 #define STRBUF_ENCODE_SLASH 1
+#define STRBUF_ENCODE_HOST_AND_PORT 2
 
 /**
  * Append the contents of a string to a strbuf, percent-encoding any characters
@@ -365,6 +366,31 @@ void strbuf_addbuf_percentquote(struct strbuf *dst, const struct strbuf *src);
  * slashes are not percent-encoded.
  */
 void strbuf_add_percentencode(struct strbuf *dst, const char *src, int flags);
+
+enum humanise_flags {
+	/*
+	 * Use rate based units for humanised values.
+	 */
+	HUMANISE_RATE = (1 << 0),
+	/*
+	 * Use compact "B" unit symbol instead of "byte/bytes" for humanised
+	 * values.
+	 */
+	HUMANISE_COMPACT = (1 << 1),
+};
+
+/**
+ * Converts the given byte size into a downscaled human-readable value and
+ * corresponding unit as two separate strings.
+ */
+void humanise_bytes(off_t bytes, char **value, const char **unit,
+		    unsigned flags);
+
+/**
+ * Converts the given count into a downscaled human-readable value and
+ * corresponding unit as two separate strings.
+ */
+void humanise_count(size_t count, char **value, const char **unit);
 
 /**
  * Append the given byte size as a human-readable string (i.e. 12.23 KiB,
@@ -637,28 +663,6 @@ static inline void strbuf_complete_line(struct strbuf *sb)
 	strbuf_complete(sb, '\n');
 }
 
-/*
- * Copy "name" to "sb", expanding any special @-marks as handled by
- * repo_interpret_branch_name(). The result is a non-qualified branch name
- * (so "foo" or "origin/master" instead of "refs/heads/foo" or
- * "refs/remotes/origin/master").
- *
- * Note that the resulting name may not be a syntactically valid refname.
- *
- * If "allowed" is non-zero, restrict the set of allowed expansions. See
- * repo_interpret_branch_name() for details.
- */
-void strbuf_branchname(struct strbuf *sb, const char *name,
-		       unsigned allowed);
-
-/*
- * Like strbuf_branchname() above, but confirm that the result is
- * syntactically valid to be used as a local branch name in refs/heads/.
- *
- * The return value is "0" if the result is valid, and "-1" otherwise.
- */
-int strbuf_check_branch_ref(struct strbuf *sb, const char *name);
-
 typedef int (*char_predicate)(char ch);
 
 void strbuf_addstr_urlencode(struct strbuf *sb, const char *name,
@@ -681,9 +685,9 @@ char *xstrvfmt(const char *fmt, va_list ap);
 __attribute__((format (printf, 1, 2)))
 char *xstrfmt(const char *fmt, ...);
 
-int starts_with(const char *str, const char *prefix);
-int istarts_with(const char *str, const char *prefix);
-int starts_with_mem(const char *str, size_t len, const char *prefix);
+bool starts_with(const char *str, const char *prefix);
+bool istarts_with(const char *str, const char *prefix);
+bool starts_with_mem(const char *str, size_t len, const char *prefix);
 
 /*
  * If the string "str" is the same as the string in "prefix", then the "arg"
@@ -699,16 +703,16 @@ int starts_with_mem(const char *str, size_t len, const char *prefix);
  * can be used instead of !strcmp(arg, "--key") and then
  * skip_prefix(arg, "--key=", &arg) to parse such an option.
  */
-int skip_to_optional_arg_default(const char *str, const char *prefix,
+bool skip_to_optional_arg_default(const char *str, const char *prefix,
 				 const char **arg, const char *def);
 
-static inline int skip_to_optional_arg(const char *str, const char *prefix,
+static inline bool skip_to_optional_arg(const char *str, const char *prefix,
 				       const char **arg)
 {
 	return skip_to_optional_arg_default(str, prefix, arg, "");
 }
 
-static inline int ends_with(const char *str, const char *suffix)
+static inline bool ends_with(const char *str, const char *suffix)
 {
 	size_t len;
 	return strip_suffix(str, suffix, &len);

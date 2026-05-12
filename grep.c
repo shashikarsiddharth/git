@@ -1,9 +1,11 @@
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "git-compat-util.h"
 #include "config.h"
 #include "gettext.h"
 #include "grep.h"
 #include "hex.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "pretty.h"
 #include "userdiff.h"
 #include "xdiff-interface.h"
@@ -756,6 +758,7 @@ static struct grep_expr *grep_splice_or(struct grep_expr *x, struct grep_expr *y
 		assert(x->node == GREP_NODE_OR);
 		if (x->u.binary.right &&
 		    x->u.binary.right->node == GREP_NODE_TRUE) {
+			free(x->u.binary.right);
 			x->u.binary.right = y;
 			break;
 		}
@@ -843,11 +846,11 @@ static void free_grep_pat(struct grep_pat *pattern)
 				free_pcre2_pattern(p);
 			else
 				regfree(&p->regexp);
-			free(p->pattern);
 			break;
 		default:
 			break;
 		}
+		free(p->pattern);
 		free(p);
 	}
 }
@@ -906,15 +909,17 @@ static int patmatch(struct grep_pat *p,
 		    const char *line, const char *eol,
 		    regmatch_t *match, int eflags)
 {
-	int hit;
-
 	if (p->pcre2_pattern)
-		hit = !pcre2match(p, line, eol, match, eflags);
-	else
-		hit = !regexec_buf(&p->regexp, line, eol - line, 1, match,
-				   eflags);
+		return !pcre2match(p, line, eol, match, eflags);
 
-	return hit;
+	switch (regexec_buf(&p->regexp, line, eol - line, 1, match, eflags)) {
+	case 0:
+		return 1;
+	case REG_NOMATCH:
+		return 0;
+	default:
+		return -1;
+	}
 }
 
 static void strip_timestamp(const char *bol, const char **eol_p)
@@ -952,6 +957,8 @@ static int headerless_match_one_pattern(struct grep_pat *p,
 
  again:
 	hit = patmatch(p, bol, eol, pmatch, eflags);
+	if (hit < 0)
+		hit = 0;
 
 	if (hit && p->word_regexp) {
 		if ((pmatch[0].rm_so < 0) ||
@@ -1256,12 +1263,12 @@ static void show_line(struct grep_opt *opt,
 		 */
 		show_line_header(opt, name, lno, cno, sign);
 	}
-	if (opt->color || opt->only_matching) {
+	if (want_color(opt->color) || opt->only_matching) {
 		regmatch_t match;
 		enum grep_context ctx = GREP_CONTEXT_BODY;
 		int eflags = 0;
 
-		if (opt->color) {
+		if (want_color(opt->color)) {
 			if (sign == ':')
 				match_color = opt->colors[GREP_COLOR_MATCH_SELECTED];
 			else
@@ -1461,6 +1468,8 @@ static int look_ahead(struct grep_opt *opt,
 		regmatch_t m;
 
 		hit = patmatch(p, bol, bol + *left_p, &m, 0);
+		if (hit < 0)
+			return -1;
 		if (!hit || m.rm_so < 0 || m.rm_eo < 0)
 			continue;
 		if (earliest < 0 || m.rm_so < earliest)
@@ -1508,7 +1517,7 @@ static int fill_textconv_grep(struct repository *r,
 		fill_filespec(df, gs->identifier, 1, 0100644);
 		break;
 	case GREP_SOURCE_FILE:
-		fill_filespec(df, null_oid(), 0, 0100644);
+		fill_filespec(df, null_oid(r->hash_algo), 0, 0100644);
 		break;
 	default:
 		BUG("attempt to textconv something without a path?");
@@ -1655,9 +1664,13 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 		if (try_lookahead
 		    && !(last_hit
 			 && (show_function ||
-			     lno <= last_hit + opt->post_context))
-		    && look_ahead(opt, &left, &lno, &bol))
-			break;
+			     lno <= last_hit + opt->post_context))) {
+			hit = look_ahead(opt, &left, &lno, &bol);
+			if (hit < 0)
+				try_lookahead = 0;
+			else if (hit)
+				break;
+		}
 		eol = end_of_line(bol, &left);
 
 		if ((ctx == GREP_CONTEXT_HEAD) && (eol == bol))
@@ -1918,8 +1931,8 @@ static int grep_source_load_oid(struct grep_source *gs)
 {
 	enum object_type type;
 
-	gs->buf = repo_read_object_file(gs->repo, gs->identifier, &type,
-					&gs->size);
+	gs->buf = odb_read_object(gs->repo->objects, gs->identifier,
+				  &type, &gs->size);
 	if (!gs->buf)
 		return error(_("'%s': unable to read %s"),
 			     gs->name,

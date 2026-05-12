@@ -7,6 +7,7 @@
  */
 
 #define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
 #include "config.h"
@@ -21,7 +22,7 @@
 #include "read-cache-ll.h"
 #include "refs.h"
 #include "revision.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "setup.h"
 #include "thread-utils.h"
 #include "tree-walk.h"
@@ -187,7 +188,7 @@ static void all_attrs_init(struct attr_hashmap *map, struct attr_check *check)
 }
 
 /*
- * Atribute name cannot begin with "builtin_" which
+ * Attribute name cannot begin with "builtin_" which
  * is a reserved namespace for built in attributes values.
  */
 static int attr_name_reserved(const char *name)
@@ -259,42 +260,6 @@ const struct git_attr *git_attr(const char *name)
 	return git_attr_internal(name, strlen(name));
 }
 
-/* What does a matched pattern decide? */
-struct attr_state {
-	const struct git_attr *attr;
-	const char *setto;
-};
-
-struct pattern {
-	const char *pattern;
-	int patternlen;
-	int nowildcardlen;
-	unsigned flags;		/* PATTERN_FLAG_* */
-};
-
-/*
- * One rule, as from a .gitattributes file.
- *
- * If is_macro is true, then u.attr is a pointer to the git_attr being
- * defined.
- *
- * If is_macro is false, then u.pat is the filename pattern to which the
- * rule applies.
- *
- * In either case, num_attr is the number of attributes affected by
- * this rule, and state is an array listing them.  The attributes are
- * listed as they appear in the file (macros unexpanded).
- */
-struct match_attr {
-	union {
-		struct pattern pat;
-		const struct git_attr *attr;
-	} u;
-	char is_macro;
-	size_t num_attr;
-	struct attr_state state[FLEX_ARRAY];
-};
-
 static const char blank[] = " \t\r\n";
 
 /* Flags usable in read_attr() and parse_attr_line() family of functions. */
@@ -353,8 +318,8 @@ static const char *parse_attr(const char *src, int lineno, const char *cp,
 	return ep + strspn(ep, blank);
 }
 
-static struct match_attr *parse_attr_line(const char *line, const char *src,
-					  int lineno, unsigned flags)
+struct match_attr *parse_attr_line(const char *line, const char *src,
+				   int lineno, unsigned flags)
 {
 	size_t namelen, num_attr, i;
 	const char *cp, *name, *states;
@@ -814,7 +779,7 @@ static struct attr_stack *read_attr_from_blob(struct index_state *istate,
 	if (get_tree_entry(istate->repo, tree_oid, path, &oid, &mode))
 		return NULL;
 
-	buf = repo_read_object_file(istate->repo, &oid, &type, &sz);
+	buf = odb_read_object(istate->repo->objects, &oid, &type, &sz);
 	if (!buf || type != OBJ_BLOB) {
 		free(buf);
 		return NULL;
@@ -916,10 +881,11 @@ const char *git_attr_system_file(void)
 
 const char *git_attr_global_file(void)
 {
-	if (!git_attributes_file)
-		git_attributes_file = xdg_config_home("attributes");
+	struct repo_config_values *cfg = repo_config_values(the_repository);
+	if (!cfg->attributes_file)
+		cfg->attributes_file = xdg_config_home("attributes");
 
-	return git_attributes_file;
+	return cfg->attributes_file;
 }
 
 int git_attr_system_is_enabled(void)
@@ -1099,24 +1065,52 @@ static int path_matches(const char *pathname, int pathlen,
 			      pattern, prefix, pat->patternlen);
 }
 
-static int macroexpand_one(struct all_attrs_item *all_attrs, int nr, int rem);
+struct attr_state_queue {
+	const struct attr_state **items;
+	size_t alloc, nr;
+};
+
+static void attr_state_queue_push(struct attr_state_queue *t,
+				 const struct match_attr *a)
+{
+	for (size_t i = 0; i < a->num_attr; i++) {
+		ALLOC_GROW(t->items, t->nr + 1, t->alloc);
+		t->items[t->nr++] = &a->state[i];
+	}
+}
+
+static const struct attr_state *attr_state_queue_pop(struct attr_state_queue *t)
+{
+	return t->nr ? t->items[--t->nr] : NULL;
+}
+
+static void attr_state_queue_release(struct attr_state_queue *t)
+{
+	free(t->items);
+}
 
 static int fill_one(struct all_attrs_item *all_attrs,
 		    const struct match_attr *a, int rem)
 {
-	size_t i;
+	struct attr_state_queue todo = { 0 };
+	const struct attr_state *state;
 
-	for (i = a->num_attr; rem > 0 && i > 0; i--) {
-		const struct git_attr *attr = a->state[i - 1].attr;
+	attr_state_queue_push(&todo, a);
+	while (rem > 0 && (state = attr_state_queue_pop(&todo))) {
+		const struct git_attr *attr = state->attr;
 		const char **n = &(all_attrs[attr->attr_nr].value);
-		const char *v = a->state[i - 1].setto;
+		const char *v = state->setto;
 
 		if (*n == ATTR__UNKNOWN) {
+			const struct all_attrs_item *item =
+				&all_attrs[attr->attr_nr];
 			*n = v;
 			rem--;
-			rem = macroexpand_one(all_attrs, attr->attr_nr, rem);
+			if (item->macro && item->value == ATTR__TRUE)
+				attr_state_queue_push(&todo, item->macro);
 		}
 	}
+	attr_state_queue_release(&todo);
 	return rem;
 }
 
@@ -1139,16 +1133,6 @@ static int fill(const char *path, int pathlen, int basename_offset,
 	}
 
 	return rem;
-}
-
-static int macroexpand_one(struct all_attrs_item *all_attrs, int nr, int rem)
-{
-	const struct all_attrs_item *item = &all_attrs[nr];
-
-	if (item->macro && item->value == ATTR__TRUE)
-		return fill_one(all_attrs, item->macro, rem);
-	else
-		return rem;
 }
 
 /*

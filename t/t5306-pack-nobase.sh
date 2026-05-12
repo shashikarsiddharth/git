@@ -7,7 +7,6 @@ test_description='git-pack-object with missing base
 
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 # Create A-B chain
@@ -59,6 +58,11 @@ test_expect_success 'indirectly clone patch_clone' '
 	 git init &&
 	 git pull ../.git &&
 	 test $(git rev-parse HEAD) = $B &&
+
+	# The --path-walk feature of "git pack-objects" is not
+	# compatible with this kind of fetch from an incomplete repo.
+	GIT_TEST_PACK_PATH_WALK=0 &&
+	export GIT_TEST_PACK_PATH_WALK &&
 
 	 git pull ../patch_clone/.git &&
 	 test $(git rev-parse HEAD) = $C

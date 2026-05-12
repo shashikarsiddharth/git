@@ -1,6 +1,9 @@
 /*
  * "git push"
  */
+
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "builtin.h"
 #include "advice.h"
 #include "branch.h"
@@ -13,7 +16,6 @@
 #include "transport.h"
 #include "parse-options.h"
 #include "pkt-line.h"
-#include "repository.h"
 #include "submodule.h"
 #include "submodule-config.h"
 #include "send-pack.h"
@@ -25,7 +27,7 @@ static const char * const push_usage[] = {
 	NULL,
 };
 
-static int push_use_color = -1;
+static enum git_colorbool push_use_color = GIT_COLOR_UNKNOWN;
 static char push_colors[][COLOR_MAXLEN] = {
 	GIT_COLOR_RESET,
 	GIT_COLOR_RED,	/* ERROR */
@@ -72,13 +74,15 @@ static void refspec_append_mapped(struct refspec *refspec, const char *ref,
 	const char *branch_name;
 
 	if (remote->push.nr) {
-		struct refspec_item query;
-		memset(&query, 0, sizeof(struct refspec_item));
-		query.src = matched->name;
-		if (!query_refspecs(&remote->push, &query) && query.dst) {
+		struct refspec_item query = {
+			.src = matched->name,
+		};
+
+		if (!refspec_find_match(&remote->push, &query) && query.dst) {
 			refspec_appendf(refspec, "%s%s:%s",
 					query.force ? "+" : "",
 					query.src, query.dst);
+			free(query.dst);
 			return;
 		}
 	}
@@ -147,6 +151,7 @@ static NORETURN void die_push_simple(struct branch *branch,
 	const char *advice_pushdefault_maybe = "";
 	const char *advice_automergesimple_maybe = "";
 	const char *short_upstream = branch->merge[0]->src;
+	struct repo_config_values *cfg = repo_config_values(the_repository);
 
 	skip_prefix(short_upstream, "refs/heads/", &short_upstream);
 
@@ -158,7 +163,7 @@ static NORETURN void die_push_simple(struct branch *branch,
 		advice_pushdefault_maybe = _("\n"
 				 "To choose either option permanently, "
 				 "see push.default in 'git help config'.\n");
-	if (git_branch_track != BRANCH_TRACK_SIMPLE)
+	if (cfg->branch_track != BRANCH_TRACK_SIMPLE)
 		advice_automergesimple_maybe = _("\n"
 				 "To avoid automatically configuring "
 				 "an upstream branch when its name\n"
@@ -415,7 +420,7 @@ static int do_push(int flags,
 		   const struct string_list *push_options,
 		   struct remote *remote)
 {
-	int i, errs;
+	int errs;
 	struct strvec *url;
 	struct refspec *push_refspec = &rs;
 
@@ -430,7 +435,7 @@ static int do_push(int flags,
 	}
 	errs = 0;
 	url = push_url_of_remote(remote);
-	for (i = 0; i < url->nr; i++) {
+	for (size_t i = 0; i < url->nr; i++) {
 		struct transport *transport =
 			transport_get(remote, url->v[i]);
 		if (flags & TRANSPORT_PUSH_OPTIONS)
@@ -517,14 +522,7 @@ static int git_push_config(const char *k, const char *v,
 			RECURSE_SUBMODULES_ON_DEMAND : RECURSE_SUBMODULES_OFF;
 		recurse_submodules = val;
 	} else if (!strcmp(k, "push.pushoption")) {
-		if (!v)
-			return config_error_nonbool(k);
-		else
-			if (!*v)
-				string_list_clear(&push_options_config, 0);
-			else
-				string_list_append(&push_options_config, v);
-		return 0;
+		return parse_transport_option(k, v, &push_options_config);
 	} else if (!strcmp(k, "color.push")) {
 		push_use_color = git_config_colorbool(k, v);
 		return 0;
@@ -546,7 +544,10 @@ static int git_push_config(const char *k, const char *v,
 	return git_default_config(k, v, ctx, NULL);
 }
 
-int cmd_push(int argc, const char **argv, const char *prefix)
+int cmd_push(int argc,
+	     const char **argv,
+	     const char *prefix,
+	     struct repository *repository UNUSED)
 {
 	int flags = 0;
 	int tags = 0;
@@ -598,7 +599,7 @@ int cmd_push(int argc, const char **argv, const char *prefix)
 	};
 
 	packet_trace_identity("push");
-	git_config(git_push_config, &flags);
+	repo_config(the_repository, git_push_config, &flags);
 	argc = parse_options(argc, argv, prefix, options, push_usage, 0);
 	push_options = (push_options_cmdline.nr
 		? &push_options_cmdline
@@ -664,6 +665,7 @@ int cmd_push(int argc, const char **argv, const char *prefix)
 	rc = do_push(flags, push_options, remote);
 	string_list_clear(&push_options_cmdline, 0);
 	string_list_clear(&push_options_config, 0);
+	clear_cas_option(&cas);
 	if (rc == -1)
 		usage_with_options(push_usage, options);
 	else

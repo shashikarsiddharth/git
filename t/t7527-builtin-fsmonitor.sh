@@ -408,9 +408,8 @@ move_directory() {
 # ensure we are getting the OS notifications and do not try to confirm what
 # is reported by `git status`.
 #
-# We run a simple query after modifying the filesystem just to introduce
-# a bit of a delay so that the trace logging from the daemon has time to
-# get flushed to disk.
+# We use retry_grep to handle races between the daemon writing events
+# to the trace file and our check.
 #
 # We `reset` and `clean` at the bottom of each test (and before stopping the
 # daemon) because these commands might implicitly restart the daemon.
@@ -422,6 +421,24 @@ clean_up_repo_and_stop_daemon () {
 	rm -f .git/trace
 }
 
+# Retry a grep up to RETRY_TIMEOUT times until it succeeds.
+#
+RETRY_TIMEOUT=5
+
+retry_grep () {
+	nr_tries_left=$RETRY_TIMEOUT
+	until grep "$1" "$2" 2>/dev/null
+	do
+		if test $nr_tries_left -eq 0
+		then
+			grep "$1" "$2"
+			return
+		fi
+		nr_tries_left=$(($nr_tries_left - 1))
+		sleep 1
+	done
+}
+
 test_expect_success 'edit some files' '
 	test_when_finished clean_up_repo_and_stop_daemon &&
 
@@ -429,12 +446,10 @@ test_expect_success 'edit some files' '
 
 	edit_files &&
 
-	test-tool fsmonitor-client query --token 0 &&
-
-	grep "^event: dir1/modified$"  .git/trace &&
-	grep "^event: dir2/modified$"  .git/trace &&
-	grep "^event: modified$"       .git/trace &&
-	grep "^event: dir1/untracked$" .git/trace
+	retry_grep "^event: dir1/modified$" .git/trace &&
+	retry_grep "^event: dir2/modified$"  .git/trace &&
+	retry_grep "^event: modified$"       .git/trace &&
+	retry_grep "^event: dir1/untracked$" .git/trace
 '
 
 test_expect_success 'create some files' '
@@ -444,11 +459,9 @@ test_expect_success 'create some files' '
 
 	create_files &&
 
-	test-tool fsmonitor-client query --token 0 &&
-
-	grep "^event: dir1/new$" .git/trace &&
-	grep "^event: dir2/new$" .git/trace &&
-	grep "^event: new$"      .git/trace
+	retry_grep "^event: dir1/new$" .git/trace &&
+	retry_grep "^event: dir2/new$" .git/trace &&
+	retry_grep "^event: new$"      .git/trace
 '
 
 test_expect_success 'delete some files' '
@@ -458,11 +471,9 @@ test_expect_success 'delete some files' '
 
 	delete_files &&
 
-	test-tool fsmonitor-client query --token 0 &&
-
-	grep "^event: dir1/delete$" .git/trace &&
-	grep "^event: dir2/delete$" .git/trace &&
-	grep "^event: delete$"      .git/trace
+	retry_grep "^event: dir1/delete$" .git/trace &&
+	retry_grep "^event: dir2/delete$" .git/trace &&
+	retry_grep "^event: delete$"      .git/trace
 '
 
 test_expect_success 'rename some files' '
@@ -472,14 +483,12 @@ test_expect_success 'rename some files' '
 
 	rename_files &&
 
-	test-tool fsmonitor-client query --token 0 &&
-
-	grep "^event: dir1/rename$"  .git/trace &&
-	grep "^event: dir2/rename$"  .git/trace &&
-	grep "^event: rename$"       .git/trace &&
-	grep "^event: dir1/renamed$" .git/trace &&
-	grep "^event: dir2/renamed$" .git/trace &&
-	grep "^event: renamed$"      .git/trace
+	retry_grep "^event: dir1/rename$" .git/trace &&
+	retry_grep "^event: dir2/rename$"  .git/trace &&
+	retry_grep "^event: rename$"       .git/trace &&
+	retry_grep "^event: dir1/renamed$" .git/trace &&
+	retry_grep "^event: dir2/renamed$" .git/trace &&
+	retry_grep "^event: renamed$"      .git/trace
 '
 
 test_expect_success 'rename directory' '
@@ -489,10 +498,8 @@ test_expect_success 'rename directory' '
 
 	mv dirtorename dirrenamed &&
 
-	test-tool fsmonitor-client query --token 0 &&
-
-	grep "^event: dirtorename/*$" .git/trace &&
-	grep "^event: dirrenamed/*$"  .git/trace
+	retry_grep "^event: dirtorename/*$" .git/trace &&
+	retry_grep "^event: dirrenamed/*$"  .git/trace
 '
 
 test_expect_success 'file changes to directory' '
@@ -502,10 +509,8 @@ test_expect_success 'file changes to directory' '
 
 	file_to_directory &&
 
-	test-tool fsmonitor-client query --token 0 &&
-
-	grep "^event: delete$"     .git/trace &&
-	grep "^event: delete/new$" .git/trace
+	retry_grep "^event: delete$" .git/trace &&
+	retry_grep "^event: delete/new$" .git/trace
 '
 
 test_expect_success 'directory changes to a file' '
@@ -515,9 +520,7 @@ test_expect_success 'directory changes to a file' '
 
 	directory_to_file &&
 
-	test-tool fsmonitor-client query --token 0 &&
-
-	grep "^event: dir1$" .git/trace
+	retry_grep "^event: dir1$" .git/trace
 '
 
 # The next few test cases exercise the token-resync code.  When filesystem
@@ -765,7 +768,7 @@ done
 # by the FSMonitor response to skip those recursive calls.  That is,
 # even if FSMonitor says that the mtime of the submodule directory
 # hasn't changed and it could be implicitly marked valid, we must
-# not take that shortcut.  We need to force the recusion into the
+# not take that shortcut.  We need to force the recursion into the
 # submodule so that we get a summary of the status *within* the
 # submodule.
 
@@ -905,6 +908,57 @@ test_expect_success "submodule absorbgitdirs implicitly starts daemon" '
 	# Confirm that the trace2 log contains a record of the
 	# daemon starting.
 	test_subcommand git fsmonitor--daemon start <super-sub.trace
+'
+
+start_git_in_background () {
+	git "$@" &
+	git_pid=$!
+	git_pgid=$(ps -o pgid= -p $git_pid)
+	nr_tries_left=10
+	while true
+	do
+		if test $nr_tries_left -eq 0
+		then
+			kill -- -$git_pgid
+			exit 1
+		fi
+		sleep 1
+		nr_tries_left=$(($nr_tries_left - 1))
+	done >/dev/null 2>&1 &
+	watchdog_pid=$!
+	wait $git_pid
+}
+
+stop_git () {
+	while kill -0 -- -$git_pgid
+	do
+		kill -- -$git_pgid
+		sleep 1
+	done
+}
+
+stop_watchdog () {
+	while kill -0 $watchdog_pid
+	do
+		kill $watchdog_pid
+		sleep 1
+	done
+}
+
+test_expect_success !MINGW "submodule implicitly starts daemon by pull" '
+	test_atexit "stop_watchdog" &&
+	test_when_finished "stop_git; rm -rf cloned super sub" &&
+
+	create_super super &&
+	create_sub sub &&
+
+	git -C super submodule add ../sub ./dir_1/dir_2/sub &&
+	git -C super commit -m "add sub" &&
+	git clone --recurse-submodules super cloned &&
+
+	git -C cloned/dir_1/dir_2/sub config core.fsmonitor true &&
+	set -m &&
+	start_git_in_background -C cloned pull --recurse-submodules
 '
 
 # On a case-insensitive file system, confirm that the daemon

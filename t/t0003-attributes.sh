@@ -2,7 +2,6 @@
 
 test_description=gitattributes
 
-TEST_PASSES_SANITIZE_LEAK=true
 TEST_CREATE_REPO_NO_TEMPLATE=1
 . ./test-lib.sh
 
@@ -663,6 +662,26 @@ test_expect_success 'user defined builtin_objectmode values are ignored' '
 	attr_check_object_mode_basic foo_1 100644 &&
 	echo "builtin_objectmode is not a valid attribute name: .gitattributes:1" >expect &&
 	test_cmp expect err
+'
+
+test_expect_success ULIMIT_STACK_SIZE 'deep macro recursion' '
+	n=3000 &&
+	{
+		i=0 &&
+		while test $i -lt $n; do
+			echo "[attr]a$i a$((i+1))" &&
+			i=$((i+1)) ||
+			return 1
+		done &&
+		echo "[attr]a$n -text" &&
+		echo "file a0"
+	} >.gitattributes &&
+	{
+		echo "file: text: unset" &&
+		test_seq -f "file: a%d: set" 0 $n
+	} >expect &&
+	run_with_limited_stack git check-attr -a file >actual &&
+	test_cmp expect actual
 '
 
 test_done

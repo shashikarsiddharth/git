@@ -1,5 +1,7 @@
+#define USE_THE_REPOSITORY_VARIABLE
 #include "builtin.h"
 #include "config.h"
+#include "environment.h"
 #include "gettext.h"
 #include "run-command.h"
 #include "parse-options.h"
@@ -61,7 +63,10 @@ static const char * const verify_pack_usage[] = {
 	NULL
 };
 
-int cmd_verify_pack(int argc, const char **argv, const char *prefix)
+int cmd_verify_pack(int argc,
+		    const char **argv,
+		    const char *prefix,
+		    struct repository *repo UNUSED)
 {
 	int err = 0;
 	unsigned int flags = 0;
@@ -77,7 +82,7 @@ int cmd_verify_pack(int argc, const char **argv, const char *prefix)
 		OPT_END()
 	};
 
-	git_config(git_default_config, NULL);
+	repo_config(the_repository, git_default_config, NULL);
 	argc = parse_options(argc, argv, prefix, verify_pack_options,
 			     verify_pack_usage, 0);
 	if (argc < 1)

@@ -23,8 +23,8 @@ one tagged as v1.0.0.  They all have one regular file each.
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
+. "$TEST_DIRECTORY/lib-loose.sh"
 
 test_cmp_failed_rev_parse () {
 	dir=$1
@@ -68,8 +68,8 @@ test_expect_success 'ambiguous loose bad object parsed as OBJ_BAD' '
 		cd blob.bad &&
 
 		# Both have the prefix "bad0"
-		echo xyzfaowcoh | git hash-object -t bad -w --stdin --literally &&
-		echo xyzhjpyvwl | git hash-object -t bad -w --stdin --literally
+		echo xyzfaowcoh | loose_obj objects bad &&
+		echo xyzhjpyvwl | loose_obj objects bad
 	) &&
 
 	test_cmp_failed_rev_parse blob.bad bad0 <<-\EOF

@@ -2,7 +2,6 @@
 
 test_description='Test automatic use of a pager.'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-pager.sh
 . "$TEST_DIRECTORY"/lib-terminal.sh
@@ -663,9 +662,9 @@ test_expect_success 'setup trace2' '
 '
 
 test_expect_success 'setup large log output' '
-	perl -e "
-		print \"this is a long commit message\" x 50000
-	" >commit-msg &&
+	test-tool genzeros 50000 |
+	tr "\000" "a" |
+	sed "s/a/this is a long commit message/g" >commit-msg &&
 	git commit --allow-empty -F commit-msg
 '
 

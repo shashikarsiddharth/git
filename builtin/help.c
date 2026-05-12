@@ -1,8 +1,12 @@
 /*
  * Builtin help command
  */
+
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "builtin.h"
 #include "config.h"
+#include "environment.h"
 #include "exec-cmd.h"
 #include "gettext.h"
 #include "pager.h"
@@ -50,9 +54,10 @@ static enum help_action {
 	HELP_ACTION_DEVELOPER_INTERFACES,
 	HELP_ACTION_CONFIG_FOR_COMPLETION,
 	HELP_ACTION_CONFIG_SECTIONS_FOR_COMPLETION,
+	HELP_ACTION_ALIASES_FOR_COMPLETION,
 } cmd_mode;
 
-static const char *html_path;
+static char *html_path;
 static int verbose = 1;
 static enum help_format help_format = HELP_FORMAT_NONE;
 static int exclude_guides;
@@ -86,6 +91,8 @@ static struct option builtin_help_options[] = {
 		    HELP_ACTION_CONFIG_FOR_COMPLETION, PARSE_OPT_HIDDEN),
 	OPT_CMDMODE_F(0, "config-sections-for-completion", &cmd_mode, "",
 		    HELP_ACTION_CONFIG_SECTIONS_FOR_COMPLETION, PARSE_OPT_HIDDEN),
+	OPT_CMDMODE_F(0, "aliases-for-completion", &cmd_mode, "",
+		    HELP_ACTION_ALIASES_FOR_COMPLETION, PARSE_OPT_HIDDEN),
 
 	OPT_END(),
 };
@@ -107,6 +114,49 @@ struct slot_expansion {
 	int found;
 };
 
+static void set_config_vars(struct string_list *keys_uniq, struct string_list_item *var)
+{
+	struct strbuf sb = STRBUF_INIT;
+	const char *str = var->string;
+	const char *wildcard = strchr(str, '*');
+	const char *tag = strchr(str, '<');
+	const char *cut;
+
+	if (wildcard && tag)
+		cut = wildcard < tag ? wildcard : tag;
+	else if (wildcard)
+		cut = wildcard;
+	else if (tag)
+		cut = tag;
+	else {
+		string_list_append(keys_uniq, str);
+		return;
+	}
+
+	strbuf_add(&sb, str, cut - str);
+	string_list_append(keys_uniq, sb.buf);
+	strbuf_release(&sb);
+}
+
+static void set_config_sections(struct string_list *keys_uniq, struct string_list_item *var)
+{
+	struct strbuf sb = STRBUF_INIT;
+	const char *str = var->string;
+	const char *dot = strchr(str, '.');
+	const char *cut;
+
+	if (dot)
+		cut = dot;
+	else {
+		set_config_vars(keys_uniq, var);
+		return;
+	}
+
+	strbuf_add(&sb, str, cut - str);
+	string_list_append(keys_uniq, sb.buf);
+	strbuf_release(&sb);
+}
+
 static void list_config_help(enum show_config_type type)
 {
 	struct slot_expansion slot_expansions[] = {
@@ -127,14 +177,12 @@ static void list_config_help(enum show_config_type type)
 	struct string_list keys = STRING_LIST_INIT_DUP;
 	struct string_list keys_uniq = STRING_LIST_INIT_DUP;
 	struct string_list_item *item;
-	int i;
+	struct strbuf sb = STRBUF_INIT;
 
 	for (p = config_name_list; *p; p++) {
 		const char *var = *p;
-		struct strbuf sb = STRBUF_INIT;
 
 		for (e = slot_expansions; e->prefix; e++) {
-
 			strbuf_reset(&sb);
 			strbuf_addf(&sb, "%s.%s", e->prefix, e->placeholder);
 			if (!strcasecmp(var, sb.buf)) {
@@ -143,60 +191,39 @@ static void list_config_help(enum show_config_type type)
 				break;
 			}
 		}
-		strbuf_release(&sb);
+
 		if (!e->prefix)
 			string_list_append(&keys, var);
 	}
+
+	strbuf_release(&sb);
 
 	for (e = slot_expansions; e->prefix; e++)
 		if (!e->found)
 			BUG("slot_expansion %s.%s is not used",
 			    e->prefix, e->placeholder);
 
-	string_list_sort(&keys);
-	for (i = 0; i < keys.nr; i++) {
-		const char *var = keys.items[i].string;
-		const char *wildcard, *tag, *cut;
-		const char *dot = NULL;
-		struct strbuf sb = STRBUF_INIT;
-
+	for (size_t i = 0; i < keys.nr; i++) {
 		switch (type) {
 		case SHOW_CONFIG_HUMAN:
-			puts(var);
-			continue;
+			string_list_append(&keys_uniq, keys.items[i].string);
+			break;
 		case SHOW_CONFIG_SECTIONS:
-			dot = strchr(var, '.');
+			set_config_sections(&keys_uniq, &keys.items[i]);
 			break;
 		case SHOW_CONFIG_VARS:
+			set_config_vars(&keys_uniq, &keys.items[i]);
 			break;
+		default:
+			BUG("%d: unexpected type", type);
 		}
-		wildcard = strchr(var, '*');
-		tag = strchr(var, '<');
-
-		if (!dot && !wildcard && !tag) {
-			string_list_append(&keys_uniq, var);
-			continue;
-		}
-
-		if (dot)
-			cut = dot;
-		else if (wildcard && !tag)
-			cut = wildcard;
-		else if (!wildcard && tag)
-			cut = tag;
-		else
-			cut = wildcard < tag ? wildcard : tag;
-
-		strbuf_add(&sb, var, cut - var);
-		string_list_append(&keys_uniq, sb.buf);
-		strbuf_release(&sb);
-
 	}
-	string_list_clear(&keys, 0);
-	string_list_remove_duplicates(&keys_uniq, 0);
+
+	string_list_sort_u(&keys_uniq, 0);
 	for_each_string_list_item(item, &keys_uniq)
 		puts(item->string);
 	string_list_clear(&keys_uniq, 0);
+	string_list_clear(&keys, 0);
 }
 
 static enum help_format parse_help_format(const char *format)
@@ -208,7 +235,7 @@ static enum help_format parse_help_format(const char *format)
 	if (!strcmp(format, "web") || !strcmp(format, "html"))
 		return HELP_FORMAT_WEB;
 	/*
-	 * Please update _git_config() in git-completion.bash when you
+	 * Please update _repo_config() in git-completion.bash when you
 	 * add new help formats.
 	 */
 	die(_("unrecognized help format '%s'"), format);
@@ -409,6 +436,7 @@ static int git_help_config(const char *var, const char *value,
 	if (!strcmp(var, "help.htmlpath")) {
 		if (!value)
 			return config_error_nonbool(var);
+		free(html_path);
 		html_path = xstrdup(value);
 		return 0;
 	}
@@ -513,23 +541,24 @@ static void show_info_page(const char *page)
 static void get_html_page_path(struct strbuf *page_path, const char *page)
 {
 	struct stat st;
+	const char *path = html_path;
 	char *to_free = NULL;
 
-	if (!html_path)
-		html_path = to_free = system_path(GIT_HTML_PATH);
+	if (!path)
+		path = to_free = system_path(GIT_HTML_PATH);
 
 	/*
 	 * Check that the page we're looking for exists.
 	 */
-	if (!strstr(html_path, "://")) {
-		if (stat(mkpath("%s/%s.html", html_path, page), &st)
+	if (!strstr(path, "://")) {
+		if (stat(mkpath("%s/%s.html", path, page), &st)
 		    || !S_ISREG(st.st_mode))
 			die("'%s/%s.html': documentation file not found.",
-				html_path, page);
+				path, page);
 	}
 
 	strbuf_init(page_path, 0);
-	strbuf_addf(page_path, "%s/%s.html", html_path, page);
+	strbuf_addf(page_path, "%s/%s.html", path, page);
 	free(to_free);
 }
 
@@ -540,19 +569,19 @@ static void open_html(const char *path)
 
 static void show_html_page(const char *page)
 {
-	struct strbuf page_path; /* it leaks but we exec bellow */
+	struct strbuf page_path; /* it leaks but we exec below */
 
 	get_html_page_path(&page_path, page);
 
 	open_html(page_path.buf);
 }
 
-static const char *check_git_cmd(const char* cmd)
+static char *check_git_cmd(const char *cmd)
 {
 	char *alias;
 
 	if (is_git_command(cmd))
-		return cmd;
+		return xstrdup(cmd);
 
 	alias = alias_lookup(cmd);
 	if (alias) {
@@ -585,14 +614,13 @@ static const char *check_git_cmd(const char* cmd)
 			die(_("bad alias.%s string: %s"), cmd,
 			    split_cmdline_strerror(count));
 		free(argv);
-		UNLEAK(alias);
 		return alias;
 	}
 
 	if (exclude_guides)
 		return help_unknown_cmd(cmd);
 
-	return cmd;
+	return xstrdup(cmd);
 }
 
 static void no_help_format(const char *opt_mode, enum help_format fmt)
@@ -631,10 +659,14 @@ static void opt_mode_usage(int argc, const char *opt_mode,
 	no_help_format(opt_mode, fmt);
 }
 
-int cmd_help(int argc, const char **argv, const char *prefix)
+int cmd_help(int argc,
+	     const char **argv,
+	     const char *prefix,
+	     struct repository *repo UNUSED)
 {
 	int nongit;
 	enum help_format parsed_help_format;
+	char *command = NULL;
 	const char *page;
 
 	argc = parse_options(argc, argv, prefix, builtin_help_options,
@@ -651,7 +683,7 @@ int cmd_help(int argc, const char **argv, const char *prefix)
 	case HELP_ACTION_ALL:
 		opt_mode_usage(argc, "--all", help_format);
 		if (verbose) {
-			setup_pager();
+			setup_pager(the_repository);
 			list_all_cmds_help(show_external_commands,
 					   show_aliases);
 			return 0;
@@ -683,9 +715,19 @@ int cmd_help(int argc, const char **argv, const char *prefix)
 			       help_format);
 		list_config_help(SHOW_CONFIG_SECTIONS);
 		return 0;
+	case HELP_ACTION_ALIASES_FOR_COMPLETION: {
+		struct string_list alias_list = STRING_LIST_INIT_DUP;
+		opt_mode_usage(argc, "--aliases-for-completion", help_format);
+		list_aliases(&alias_list);
+		for (size_t i = 0; i < alias_list.nr; i++)
+			printf("%s%c%s%c", alias_list.items[i].string, '\n',
+			       (char *)alias_list.items[i].util, '\0');
+		string_list_clear(&alias_list, 1);
+		return 0;
+	}
 	case HELP_ACTION_CONFIG:
 		opt_mode_usage(argc, "--config", help_format);
-		setup_pager();
+		setup_pager(the_repository);
 		list_config_help(SHOW_CONFIG_HUMAN);
 		printf("\n%s\n", _("'git help config' for more information"));
 		return 0;
@@ -699,16 +741,16 @@ int cmd_help(int argc, const char **argv, const char *prefix)
 	}
 
 	setup_git_directory_gently(&nongit);
-	git_config(git_help_config, NULL);
+	repo_config(the_repository, git_help_config, NULL);
 
 	if (parsed_help_format != HELP_FORMAT_NONE)
 		help_format = parsed_help_format;
 	if (help_format == HELP_FORMAT_NONE)
 		help_format = parse_help_format(DEFAULT_HELP_FORMAT);
 
-	argv[0] = check_git_cmd(argv[0]);
+	command = check_git_cmd(argv[0]);
 
-	page = cmd_to_page(argv[0]);
+	page = cmd_to_page(command);
 	switch (help_format) {
 	case HELP_FORMAT_NONE:
 	case HELP_FORMAT_MAN:
@@ -722,5 +764,6 @@ int cmd_help(int argc, const char **argv, const char *prefix)
 		break;
 	}
 
+	free(command);
 	return 0;
 }

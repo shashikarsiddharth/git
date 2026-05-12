@@ -4,7 +4,6 @@ test_description='git send-email'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 # May be altered later in the test
@@ -200,6 +199,13 @@ test_expect_success $PREREQ 'cc trailer with get_maintainer.pl output' '
 		--cc-cmd=./expected-cc-script.sh \
 		--smtp-server="$(pwd)/fake.sendmail" &&
 	test_cmp expected-cc commandline1
+'
+
+test_expect_failure $PREREQ 'invalid smtp server port value' '
+	clean_fake_sendmail &&
+	git send-email -1 --to=recipient@example.com \
+		--smtp-server-port=bogus-symbolic-name \
+		--smtp-server="$(pwd)/fake.sendmail"
 '
 
 test_expect_success $PREREQ 'setup expect' "
@@ -1324,7 +1330,7 @@ test_expect_success $PREREQ 'cc list is sanitized' '
 	Reviewed-by: Füñný Nâmé <odd_?=mail@example.com>
 	Reported-by: bugger on Jira
 	Reported-by: Douglas Reporter <doug@example.com> [from Jira profile]
-	BugID: 12345
+	BugID: 12345should-not-appear
 	Co-developed-by: "C. O. Developer" <codev@example.com>
 	Signed-off-by: A. U. Thor <thor.au@example.com>
 	EOF
@@ -1337,7 +1343,7 @@ test_expect_success $PREREQ 'cc list is sanitized' '
 " <odd_?=mail@example.com>" actual-show-all-headers &&
 	test_grep "^(body) Ignoring Reported-by .* bugger on Jira" actual-show-all-headers &&
 	test_grep "^(body) Adding cc: Douglas Reporter <doug@example.com>" actual-show-all-headers &&
-	test_grep ! "12345" actual-show-all-headers &&
+	test_grep ! "12345should-not-appear" actual-show-all-headers &&
 	test_grep "^(body) Adding cc: \"C. O. Developer\" <codev@example.com>" actual-show-all-headers &&
 	test_grep "^(body) Adding cc: \"A. U. Thor\" <thor.au@example.com>" actual-show-all-headers
 '
@@ -1643,7 +1649,9 @@ test_expect_success $PREREQ 'To headers from files reset each patch' '
 '
 
 test_expect_success $PREREQ 'setup expect' '
-cat >email-using-8bit <<\EOF
+# NOTE: do not quote this heredoc, Dash 0.5.13 has a bug with heredocs
+# that contain multibyte chars.
+cat >email-using-8bit <<EOF
 From fe6ecc66ece37198fe5db91fa2fc41d9f4fe5cc4 Mon Sep 17 00:00:00 2001
 Message-ID: <bogus-message-id@example.com>
 From: author@example.com
@@ -1685,7 +1693,7 @@ test_expect_success $PREREQ 'asks about and fixes 8bit encodings' '
 			email-using-8bit >stdout &&
 	grep "do not declare a Content-Transfer-Encoding" stdout &&
 	grep email-using-8bit stdout &&
-	grep "Which 8bit encoding" stdout &&
+	grep "Declare which 8bit encoding to use" stdout &&
 	grep -E "Content|MIME" msgtxt1 >actual &&
 	test_cmp content-type-decl actual
 '
@@ -1729,7 +1737,9 @@ test_expect_success $PREREQ '--8bit-encoding overrides sendemail.8bitEncoding' '
 '
 
 test_expect_success $PREREQ 'setup expect' '
-	cat >email-using-8bit <<-\EOF
+	# NOTE: do not quote this heredoc, Dash 0.5.13 has a bug with heredocs
+	# that contain multibyte chars.
+	cat >email-using-8bit <<-EOF
 	From fe6ecc66ece37198fe5db91fa2fc41d9f4fe5cc4 Mon Sep 17 00:00:00 2001
 	Message-ID: <bogus-message-id@example.com>
 	From: author@example.com
@@ -1758,7 +1768,9 @@ test_expect_success $PREREQ '--8bit-encoding also treats subject' '
 '
 
 test_expect_success $PREREQ 'setup expect' '
-	cat >email-using-8bit <<-\EOF
+	# NOTE: do not quote this heredoc, Dash 0.5.13 has a bug with heredocs
+	# that contain multibyte chars.
+	cat >email-using-8bit <<-EOF
 	From fe6ecc66ece37198fe5db91fa2fc41d9f4fe5cc4 Mon Sep 17 00:00:00 2001
 	Message-ID: <bogus-message-id@example.com>
 	From: A U Thor <author@example.com>

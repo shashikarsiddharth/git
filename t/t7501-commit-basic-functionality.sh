@@ -9,7 +9,6 @@ test_description='git commit'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY/lib-diff.sh"
 
@@ -47,7 +46,7 @@ test_expect_success 'paths and -a do not mix' '
 	test_must_fail git commit -m foo -a file
 '
 
-test_expect_success PERL 'can use paths with --interactive' '
+test_expect_success 'can use paths with --interactive' '
 	echo bong-o-bong >file &&
 	# 2: update, 1:st path, that is all, 7: quit
 	test_write_lines 2 1 "" 7 |
@@ -346,12 +345,12 @@ test_expect_success 'overriding author from command line' '
 	grep Rubber.Duck output
 '
 
-test_expect_success PERL 'interactive add' '
+test_expect_success 'interactive add' '
 	echo 7 | test_must_fail git commit --interactive >out &&
 	grep "What now" out
 '
 
-test_expect_success PERL "commit --interactive doesn't change index if editor aborts" '
+test_expect_success "commit --interactive doesn't change index if editor aborts" '
 	echo zoo >file &&
 	test_must_fail git diff --exit-code >diff1 &&
 	test_write_lines u "*" q |

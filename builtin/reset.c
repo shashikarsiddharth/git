@@ -8,6 +8,8 @@
  * Copyright (c) 2005, 2006 Linus Torvalds and Junio C Hamano
  */
 
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "builtin.h"
 #include "advice.h"
 #include "config.h"
@@ -26,6 +28,7 @@
 #include "object-name.h"
 #include "parse-options.h"
 #include "path.h"
+#include "repository.h"
 #include "unpack-trees.h"
 #include "cache-tree.h"
 #include "setup.h"
@@ -115,7 +118,7 @@ static int reset_index(const char *ref, const struct object_id *oid, int reset_t
 		goto out;
 
 	if (reset_type == MIXED || reset_type == HARD) {
-		tree = parse_tree_indirect(oid);
+		tree = repo_parse_tree_indirect(the_repository, oid);
 		if (!tree) {
 			error(_("unable to read tree (%s)"), oid_to_hex(oid));
 			goto out;
@@ -330,7 +333,10 @@ static int git_reset_config(const char *var, const char *value,
 	return git_default_config(var, value, ctx, cb);
 }
 
-int cmd_reset(int argc, const char **argv, const char *prefix)
+int cmd_reset(int argc,
+	      const char **argv,
+	      const char *prefix,
+	      struct repository *repo UNUSED)
 {
 	int reset_type = NONE, update_ref_status = 0, quiet = 0;
 	int no_refresh = 0;
@@ -340,6 +346,7 @@ int cmd_reset(int argc, const char **argv, const char *prefix)
 	struct object_id oid;
 	struct pathspec pathspec;
 	int intent_to_add = 0;
+	struct interactive_options interactive_opts = INTERACTIVE_OPTIONS_INIT;
 	const struct option options[] = {
 		OPT__QUIET(&quiet, N_("be quiet, only report errors")),
 		OPT_BOOL(0, "no-refresh", &no_refresh,
@@ -364,6 +371,10 @@ int cmd_reset(int argc, const char **argv, const char *prefix)
 			       PARSE_OPT_OPTARG,
 			       option_parse_recurse_submodules_worktree_updater),
 		OPT_BOOL('p', "patch", &patch_mode, N_("select hunks interactively")),
+		OPT_BOOL(0, "auto-advance", &interactive_opts.auto_advance,
+			 N_("auto advance to the next file when selecting hunks interactively")),
+		OPT_DIFF_UNIFIED(&interactive_opts.context),
+		OPT_DIFF_INTERHUNK_CONTEXT(&interactive_opts.interhunkcontext),
 		OPT_BOOL('N', "intent-to-add", &intent_to_add,
 				N_("record only the fact that removed paths will be added later")),
 		OPT_PATHSPEC_FROM_FILE(&pathspec_from_file),
@@ -371,7 +382,7 @@ int cmd_reset(int argc, const char **argv, const char *prefix)
 		OPT_END()
 	};
 
-	git_config(git_reset_config, NULL);
+	repo_config(the_repository, git_reset_config, NULL);
 
 	argc = parse_options(argc, argv, prefix, options, git_reset_usage,
 						PARSE_OPT_KEEP_DASHDASH);
@@ -408,19 +419,34 @@ int cmd_reset(int argc, const char **argv, const char *prefix)
 		struct tree *tree;
 		if (repo_get_oid_treeish(the_repository, rev, &oid))
 			die(_("Failed to resolve '%s' as a valid tree."), rev);
-		tree = parse_tree_indirect(&oid);
+		tree = repo_parse_tree_indirect(the_repository, &oid);
 		if (!tree)
 			die(_("Could not parse object '%s'."), rev);
 		oidcpy(&oid, &tree->object.oid);
 	}
 
+	if (interactive_opts.context < -1)
+		die(_("'%s' cannot be negative"), "--unified");
+	if (interactive_opts.interhunkcontext < -1)
+		die(_("'%s' cannot be negative"), "--inter-hunk-context");
+
+	prepare_repo_settings(the_repository);
+	the_repository->settings.command_requires_full_index = 0;
+
 	if (patch_mode) {
 		if (reset_type != NONE)
 			die(_("options '%s' and '%s' cannot be used together"), "--patch", "--{hard,mixed,soft}");
 		trace2_cmd_mode("patch-interactive");
-		update_ref_status = !!run_add_p(the_repository, ADD_P_RESET, rev,
-				   &pathspec);
+		update_ref_status = !!run_add_p(the_repository, ADD_P_RESET,
+						&interactive_opts, rev, &pathspec, 0);
 		goto cleanup;
+	} else {
+		if (interactive_opts.context != -1)
+			die(_("the option '%s' requires '%s'"), "--unified", "--patch");
+		if (interactive_opts.interhunkcontext != -1)
+			die(_("the option '%s' requires '%s'"), "--inter-hunk-context", "--patch");
+		if (!interactive_opts.auto_advance)
+			die(_("the option '%s' requires '%s'"), "--no-auto-advance", "--patch");
 	}
 
 	/* git reset tree [--] paths... can be used to
@@ -441,7 +467,7 @@ int cmd_reset(int argc, const char **argv, const char *prefix)
 	else
 		trace2_cmd_mode(reset_type_names[reset_type]);
 
-	if (reset_type != SOFT && (reset_type != MIXED || get_git_work_tree()))
+	if (reset_type != SOFT && (reset_type != MIXED || repo_get_work_tree(the_repository)))
 		setup_work_tree();
 
 	if (reset_type == MIXED && is_bare_repository())
@@ -450,9 +476,6 @@ int cmd_reset(int argc, const char **argv, const char *prefix)
 
 	if (intent_to_add && reset_type != MIXED)
 		die(_("the option '%s' requires '%s'"), "-N", "--mixed");
-
-	prepare_repo_settings(the_repository);
-	the_repository->settings.command_requires_full_index = 0;
 
 	if (repo_read_index(the_repository) < 0)
 		die(_("index file corrupt"));
@@ -474,7 +497,7 @@ int cmd_reset(int argc, const char **argv, const char *prefix)
 				goto cleanup;
 			}
 			the_repository->index->updated_skipworktree = 1;
-			if (!no_refresh && get_git_work_tree()) {
+			if (!no_refresh && repo_get_work_tree(the_repository)) {
 				uint64_t t_begin, t_delta_in_ms;
 
 				t_begin = getnanotime();

@@ -5,7 +5,6 @@ test_description='tests for git branch --track'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -46,6 +45,24 @@ test_expect_success 'checkout --track -b overrides autoSetupMerge=inherit' '
 	git checkout --track=direct -b b4 main &&
 	test_cmp_config . branch.b4.remote &&
 	test_cmp_config refs/heads/main branch.b4.merge
+'
+
+test_expect_success 'ambiguous tracking info' '
+	# Set up a few remote repositories
+	git init --bare --initial-branch=trunk src1 &&
+	git init --bare --initial-branch=trunk src2 &&
+	git push src1 one:refs/heads/trunk &&
+	git push src2 two:refs/heads/trunk &&
+
+	git remote add -f src1 "file://$PWD/src1" &&
+	git remote add -f src2 "file://$PWD/src2" &&
+
+	# DWIM
+	test_must_fail git checkout trunk 2>hint.checkout &&
+	test_grep "hint: *git checkout --track" hint.checkout &&
+
+	test_must_fail git switch trunk 2>hint.switch &&
+	test_grep "hint: *git switch --track" hint.switch
 '
 
 test_done

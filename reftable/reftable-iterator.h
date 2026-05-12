@@ -1,14 +1,15 @@
 /*
-Copyright 2020 Google LLC
-
-Use of this source code is governed by a BSD-style
-license that can be found in the LICENSE file or at
-https://developers.google.com/open-source/licenses/bsd
-*/
+ * Copyright 2020 Google LLC
+ *
+ * Use of this source code is governed by a BSD-style
+ * license that can be found in the LICENSE file or at
+ * https://developers.google.com/open-source/licenses/bsd
+ */
 
 #ifndef REFTABLE_ITERATOR_H
 #define REFTABLE_ITERATOR_H
 
+#include "reftable-system.h"
 #include "reftable-record.h"
 
 struct reftable_iterator_vtable;

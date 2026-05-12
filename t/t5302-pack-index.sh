@@ -5,7 +5,6 @@
 
 test_description='pack index with 64-bit offsets and object CRC'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -292,6 +291,22 @@ test_expect_success 'too-large packs report the breach' '
 	test "$sz" -gt 20 &&
 	test_must_fail git index-pack --max-input-size=20 pack-$pack.pack 2>err &&
 	grep "maximum allowed size (20 bytes)" err
+'
+
+# git-index-pack(1) uses the default hash algorithm outside of the repository,
+# and it has no way to tell it otherwise. So we can only run this test with the
+# default hash algorithm, as it would otherwise fail to parse the tree.
+test_expect_success DEFAULT_HASH_ALGORITHM 'index-pack --fsck-objects outside of a repo' '
+	test_when_finished "rm -rf repo" &&
+	git init repo &&
+	(
+		cd repo &&
+		printf "100644 blob $(test_oid 001)\t.gitattributes\n" >tree &&
+		git mktree --missing <tree >tree-oid &&
+		git pack-objects <tree-oid pack &&
+		test_must_fail nongit git index-pack --fsck-objects "$(pwd)"/pack-*.pack 2>err &&
+		test_grep "cannot perform queued object checks outside of a repository" err
+	)
 '
 
 test_done

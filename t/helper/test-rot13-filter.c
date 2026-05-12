@@ -1,6 +1,6 @@
 /*
  * Example implementation for the Git filter protocol version 2
- * See Documentation/gitattributes.txt, section "Filter Protocol"
+ * See Documentation/gitattributes.adoc, section "Filter Protocol"
  *
  * Usage: test-tool rot13-filter [--always-delay] --log=<path> <capabilities>
  *
@@ -9,7 +9,7 @@
  * ("clean", "smudge", etc).
  *
  * When --always-delay is given all pathnames with the "can-delay" flag
- * that don't appear on the list bellow are delayed with a count of 1
+ * that don't appear on the list below are delayed with a count of 1
  * (see more below).
  *
  * This implementation supports special test cases:
@@ -324,7 +324,7 @@ static void packet_initialize(void)
 	packet_flush(1);
 }
 
-static const char *rot13_usage[] = {
+static const char *const rot13_usage[] = {
 	"test-tool rot13-filter [--always-delay] --log=<path> <capabilities>",
 	NULL
 };

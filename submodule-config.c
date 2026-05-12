@@ -1,4 +1,5 @@
 #define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
 #include "dir.h"
@@ -12,7 +13,8 @@
 #include "submodule.h"
 #include "strbuf.h"
 #include "object-name.h"
-#include "object-store-ll.h"
+#include "odb.h"
+#include "odb/source.h"
 #include "parse-options.h"
 #include "thread-utils.h"
 #include "tree-walk.h"
@@ -95,7 +97,7 @@ static void free_one_config(struct submodule_entry *entry)
 	free((void *) entry->config->branch);
 	free((void *) entry->config->url);
 	free((void *) entry->config->ignore);
-	free((void *) entry->config->update_strategy.command);
+	submodule_update_strategy_release(&entry->config->update_strategy);
 	free(entry->config);
 }
 
@@ -232,18 +234,6 @@ in_component:
 	}
 
 	return 0;
-}
-
-static int starts_with_dot_slash(const char *const path)
-{
-	return path_match_flags(path, PATH_MATCH_STARTS_WITH_DOT_SLASH |
-				PATH_MATCH_XPLATFORM);
-}
-
-static int starts_with_dot_dot_slash(const char *const path)
-{
-	return path_match_flags(path, PATH_MATCH_STARTS_WITH_DOT_DOT_SLASH |
-				PATH_MATCH_XPLATFORM);
 }
 
 static int submodule_url_is_relative(const char *url)
@@ -742,8 +732,8 @@ static const struct submodule *config_from(struct submodule_cache *cache,
 	if (submodule)
 		goto out;
 
-	config = repo_read_object_file(the_repository, &oid, &type,
-				       &config_size);
+	config = odb_read_object(the_repository->objects, &oid,
+				 &type, &config_size);
 	if (!config || type != OBJ_BLOB)
 		goto out;
 
@@ -809,7 +799,8 @@ static void config_from_gitmodules(config_fn_t fn, struct repository *repo, void
 			   repo_get_oid(repo, GITMODULES_HEAD, &oid) >= 0) {
 			config_source.blob = oidstr = xstrdup(oid_to_hex(&oid));
 			if (repo != the_repository)
-				add_submodule_odb_by_path(repo->objects->odb->path);
+				odb_add_submodule_source_by_path(the_repository->objects,
+								 repo->objects->sources->path);
 		} else {
 			goto out;
 		}
@@ -830,7 +821,7 @@ static int gitmodules_cb(const char *var, const char *value,
 
 	parameter.cache = repo->submodule_cache;
 	parameter.treeish_name = NULL;
-	parameter.gitmodules_oid = null_oid();
+	parameter.gitmodules_oid = null_oid(the_hash_algo);
 	parameter.overwrite = 1;
 
 	return parse_config(var, value, ctx, &parameter);
@@ -901,8 +892,9 @@ static void traverse_tree_submodules(struct repository *r,
 	struct submodule_tree_entry *st_entry;
 	struct name_entry name_entry;
 	char *tree_path = NULL;
+	char *tree_buf;
 
-	fill_tree_descriptor(r, &tree, treeish_name);
+	tree_buf = fill_tree_descriptor(r, &tree, treeish_name);
 	while (tree_entry(&tree, &name_entry)) {
 		if (prefix)
 			tree_path =
@@ -930,6 +922,8 @@ static void traverse_tree_submodules(struct repository *r,
 						 &name_entry.oid, out);
 		free(tree_path);
 	}
+
+	free(tree_buf);
 }
 
 void submodules_of_tree(struct repository *r,
@@ -941,6 +935,16 @@ void submodules_of_tree(struct repository *r,
 	out->entry_alloc = 0;
 
 	traverse_tree_submodules(r, treeish_name, NULL, treeish_name, out);
+}
+
+void submodule_entry_list_release(struct submodule_entry_list *list)
+{
+	for (size_t i = 0; i < list->entry_nr; i++) {
+		free(list->entries[i].name_entry);
+		repo_clear(list->entries[i].repo);
+		free(list->entries[i].repo);
+	}
+	free(list->entries);
 }
 
 void submodule_free(struct repository *r)
@@ -980,7 +984,7 @@ int config_set_in_gitmodules_file_gently(const char *key, const char *value)
 {
 	int ret;
 
-	ret = git_config_set_in_file_gently(GITMODULES_FILE, key, NULL, value);
+	ret = repo_config_set_in_file_gently(the_repository, GITMODULES_FILE, key, NULL, value);
 	if (ret < 0)
 		/* Maybe the user already did that, don't error out here */
 		warning(_("Could not update .gitmodules entry %s"), key);

@@ -2,31 +2,72 @@
 #define HASH_H
 
 #if defined(SHA1_APPLE)
+#define SHA1_BACKEND "SHA1_APPLE (No collision detection)"
 #include <CommonCrypto/CommonDigest.h>
 #elif defined(SHA1_OPENSSL)
+#  define SHA1_BACKEND "SHA1_OPENSSL (No collision detection)"
 #  include <openssl/sha.h>
 #  if defined(OPENSSL_API_LEVEL) && OPENSSL_API_LEVEL >= 3
 #    define SHA1_NEEDS_CLONE_HELPER
 #    include "sha1/openssl.h"
 #  endif
 #elif defined(SHA1_DC)
+#define SHA1_BACKEND "SHA1_DC"
 #include "sha1dc_git.h"
 #else /* SHA1_BLK */
+#define SHA1_BACKEND "SHA1_BLK (No collision detection)"
 #include "block-sha1/sha1.h"
 #endif
 
+#if defined(SHA1_APPLE_UNSAFE)
+#  define SHA1_UNSAFE_BACKEND "SHA1_APPLE_UNSAFE"
+#  include <CommonCrypto/CommonDigest.h>
+#  define platform_SHA_CTX_unsafe CC_SHA1_CTX
+#  define platform_SHA1_Init_unsafe CC_SHA1_Init
+#  define platform_SHA1_Update_unsafe CC_SHA1_Update
+#  define platform_SHA1_Final_unsafe CC_SHA1_Final
+#elif defined(SHA1_OPENSSL_UNSAFE)
+#  define SHA1_UNSAFE_BACKEND "SHA1_OPENSSL_UNSAFE"
+#  include <openssl/sha.h>
+#  if defined(OPENSSL_API_LEVEL) && OPENSSL_API_LEVEL >= 3
+#    define SHA1_NEEDS_CLONE_HELPER_UNSAFE
+#    include "sha1/openssl.h"
+#    define platform_SHA_CTX_unsafe openssl_SHA1_CTX
+#    define platform_SHA1_Init_unsafe openssl_SHA1_Init
+#    define platform_SHA1_Clone_unsafe openssl_SHA1_Clone
+#    define platform_SHA1_Update_unsafe openssl_SHA1_Update
+#    define platform_SHA1_Final_unsafe openssl_SHA1_Final
+#  else
+#    define platform_SHA_CTX_unsafe SHA_CTX
+#    define platform_SHA1_Init_unsafe SHA1_Init
+#    define platform_SHA1_Update_unsafe SHA1_Update
+#    define platform_SHA1_Final_unsafe SHA1_Final
+#  endif
+#elif defined(SHA1_BLK_UNSAFE)
+#  define SHA1_UNSAFE_BACKEND "SHA1_BLK_UNSAFE"
+#  include "block-sha1/sha1.h"
+#  define platform_SHA_CTX_unsafe blk_SHA_CTX
+#  define platform_SHA1_Init_unsafe blk_SHA1_Init
+#  define platform_SHA1_Update_unsafe blk_SHA1_Update
+#  define platform_SHA1_Final_unsafe blk_SHA1_Final
+#endif
+
 #if defined(SHA256_NETTLE)
+#define SHA256_BACKEND "SHA256_NETTLE"
 #include "sha256/nettle.h"
 #elif defined(SHA256_GCRYPT)
+#define SHA256_BACKEND "SHA256_GCRYPT"
 #define SHA256_NEEDS_CLONE_HELPER
 #include "sha256/gcrypt.h"
 #elif defined(SHA256_OPENSSL)
+#  define SHA256_BACKEND "SHA256_OPENSSL"
 #  include <openssl/sha.h>
 #  if defined(OPENSSL_API_LEVEL) && OPENSSL_API_LEVEL >= 3
 #    define SHA256_NEEDS_CLONE_HELPER
 #    include "sha256/openssl.h"
 #  endif
 #else
+#define SHA256_BACKEND "SHA256_BLK"
 #include "sha256/block/sha256.h"
 #endif
 
@@ -44,13 +85,34 @@
 #define platform_SHA1_Final    	SHA1_Final
 #endif
 
+#ifndef platform_SHA_CTX_unsafe
+#  define platform_SHA_CTX_unsafe      platform_SHA_CTX
+#  define platform_SHA1_Init_unsafe    platform_SHA1_Init
+#  define platform_SHA1_Update_unsafe  platform_SHA1_Update
+#  define platform_SHA1_Final_unsafe   platform_SHA1_Final
+#  ifdef platform_SHA1_Clone
+#    define platform_SHA1_Clone_unsafe platform_SHA1_Clone
+#  endif
+#  ifdef SHA1_NEEDS_CLONE_HELPER
+#    define SHA1_NEEDS_CLONE_HELPER_UNSAFE
+#  endif
+#endif
+
 #define git_SHA_CTX		platform_SHA_CTX
 #define git_SHA1_Init		platform_SHA1_Init
 #define git_SHA1_Update		platform_SHA1_Update
 #define git_SHA1_Final		platform_SHA1_Final
 
+#define git_SHA_CTX_unsafe	platform_SHA_CTX_unsafe
+#define git_SHA1_Init_unsafe	platform_SHA1_Init_unsafe
+#define git_SHA1_Update_unsafe	platform_SHA1_Update_unsafe
+#define git_SHA1_Final_unsafe	platform_SHA1_Final_unsafe
+
 #ifdef platform_SHA1_Clone
 #define git_SHA1_Clone	platform_SHA1_Clone
+#endif
+#ifdef platform_SHA1_Clone_unsafe
+#  define git_SHA1_Clone_unsafe platform_SHA1_Clone_unsafe
 #endif
 
 #ifndef platform_SHA256_CTX
@@ -81,6 +143,13 @@ static inline void git_SHA1_Clone(git_SHA_CTX *dst, const git_SHA_CTX *src)
 	memcpy(dst, src, sizeof(*dst));
 }
 #endif
+#ifndef SHA1_NEEDS_CLONE_HELPER_UNSAFE
+static inline void git_SHA1_Clone_unsafe(git_SHA_CTX_unsafe *dst,
+				       const git_SHA_CTX_unsafe *src)
+{
+	memcpy(dst, src, sizeof(*dst));
+}
+#endif
 
 #ifndef SHA256_NEEDS_CLONE_HELPER
 static inline void git_SHA256_Clone(git_SHA256_CTX *dst, const git_SHA256_CTX *src)
@@ -105,6 +174,16 @@ static inline void git_SHA256_Clone(git_SHA256_CTX *dst, const git_SHA256_CTX *s
 #define GIT_HASH_SHA256 2
 /* Number of algorithms supported (including unknown). */
 #define GIT_HASH_NALGOS (GIT_HASH_SHA256 + 1)
+
+/* Default hash algorithm if unspecified. */
+#ifdef WITH_BREAKING_CHANGES
+# define GIT_HASH_DEFAULT GIT_HASH_SHA256
+#else
+# define GIT_HASH_DEFAULT GIT_HASH_SHA1
+#endif
+
+/* Legacy hash algorithm. Implied for older data formats which don't specify. */
+#define GIT_HASH_SHA1_LEGACY GIT_HASH_SHA1
 
 /* "sha1", big-endian */
 #define GIT_SHA1_FORMAT_ID 0x73686131
@@ -132,20 +211,22 @@ static inline void git_SHA256_Clone(git_SHA256_CTX *dst, const git_SHA256_CTX *s
 
 struct object_id {
 	unsigned char hash[GIT_MAX_RAWSZ];
-	int algo;	/* XXX requires 4-byte alignment */
+	uint32_t algo;	/* XXX requires 4-byte alignment */
 };
 
-#define GET_OID_QUIETLY           01
-#define GET_OID_COMMIT            02
-#define GET_OID_COMMITTISH        04
-#define GET_OID_TREE             010
-#define GET_OID_TREEISH          020
-#define GET_OID_BLOB             040
-#define GET_OID_FOLLOW_SYMLINKS 0100
-#define GET_OID_RECORD_PATH     0200
-#define GET_OID_ONLY_TO_DIE    04000
-#define GET_OID_REQUIRE_PATH  010000
-#define GET_OID_HASH_ANY      020000
+#define GET_OID_QUIETLY                  01
+#define GET_OID_COMMIT                   02
+#define GET_OID_COMMITTISH               04
+#define GET_OID_TREE                    010
+#define GET_OID_TREEISH                 020
+#define GET_OID_BLOB                    040
+#define GET_OID_FOLLOW_SYMLINKS        0100
+#define GET_OID_RECORD_PATH            0200
+#define GET_OID_ONLY_TO_DIE           04000
+#define GET_OID_REQUIRE_PATH         010000
+#define GET_OID_HASH_ANY             020000
+#define GET_OID_SKIP_AMBIGUITY_CHECK 040000
+#define GET_OID_GENTLY              0100000
 
 #define GET_OID_DISAMBIGUATORS \
 	(GET_OID_COMMIT | GET_OID_COMMITTISH | \
@@ -176,17 +257,20 @@ enum get_oid_result {
 #endif
 
 /* A suitably aligned type for stack allocations of hash contexts. */
-union git_hash_ctx {
-	git_SHA_CTX sha1;
-	git_SHA256_CTX sha256;
+struct git_hash_ctx {
+	const struct git_hash_algo *algop;
+	union {
+		git_SHA_CTX sha1;
+		git_SHA_CTX_unsafe sha1_unsafe;
+		git_SHA256_CTX sha256;
+	} state;
 };
-typedef union git_hash_ctx git_hash_ctx;
 
-typedef void (*git_hash_init_fn)(git_hash_ctx *ctx);
-typedef void (*git_hash_clone_fn)(git_hash_ctx *dst, const git_hash_ctx *src);
-typedef void (*git_hash_update_fn)(git_hash_ctx *ctx, const void *in, size_t len);
-typedef void (*git_hash_final_fn)(unsigned char *hash, git_hash_ctx *ctx);
-typedef void (*git_hash_final_oid_fn)(struct object_id *oid, git_hash_ctx *ctx);
+typedef void (*git_hash_init_fn)(struct git_hash_ctx *ctx);
+typedef void (*git_hash_clone_fn)(struct git_hash_ctx *dst, const struct git_hash_ctx *src);
+typedef void (*git_hash_update_fn)(struct git_hash_ctx *ctx, const void *in, size_t len);
+typedef void (*git_hash_final_fn)(unsigned char *hash, struct git_hash_ctx *ctx);
+typedef void (*git_hash_final_oid_fn)(struct object_id *oid, struct git_hash_ctx *ctx);
 
 struct git_hash_algo {
 	/*
@@ -230,25 +314,44 @@ struct git_hash_algo {
 
 	/* The all-zeros OID. */
 	const struct object_id *null_oid;
+
+	/* The unsafe variant of this hash function, if one exists. */
+	const struct git_hash_algo *unsafe;
 };
 extern const struct git_hash_algo hash_algos[GIT_HASH_NALGOS];
 
+void git_hash_init(struct git_hash_ctx *ctx, const struct git_hash_algo *algop);
+void git_hash_clone(struct git_hash_ctx *dst, const struct git_hash_ctx *src);
+void git_hash_update(struct git_hash_ctx *ctx, const void *in, size_t len);
+void git_hash_final(unsigned char *hash, struct git_hash_ctx *ctx);
+void git_hash_final_oid(struct object_id *oid, struct git_hash_ctx *ctx);
+const struct git_hash_algo *hash_algo_ptr_by_number(uint32_t algo);
+struct git_hash_ctx *git_hash_alloc(void);
+void git_hash_free(struct git_hash_ctx *ctx);
 /*
  * Return a GIT_HASH_* constant based on the name.  Returns GIT_HASH_UNKNOWN if
  * the name doesn't match a known algorithm.
  */
-int hash_algo_by_name(const char *name);
+uint32_t hash_algo_by_name(const char *name);
 /* Identical, except based on the format ID. */
-int hash_algo_by_id(uint32_t format_id);
+uint32_t hash_algo_by_id(uint32_t format_id);
 /* Identical, except based on the length. */
-int hash_algo_by_length(int len);
+uint32_t hash_algo_by_length(size_t len);
 /* Identical, except for a pointer to struct git_hash_algo. */
-static inline int hash_algo_by_ptr(const struct git_hash_algo *p)
+static inline uint32_t hash_algo_by_ptr(const struct git_hash_algo *p)
 {
-	return p - hash_algos;
+	size_t i;
+	for (i = 0; i < GIT_HASH_NALGOS; i++) {
+		const struct git_hash_algo *algop = &hash_algos[i];
+		if (p == algop)
+			return i;
+	}
+	return GIT_HASH_UNKNOWN;
 }
 
-const struct object_id *null_oid(void);
+const struct git_hash_algo *unsafe_hash_algo(const struct git_hash_algo *algop);
+
+const struct object_id *null_oid(const struct git_hash_algo *algop);
 
 static inline int hashcmp(const unsigned char *sha1, const unsigned char *sha2, const struct git_hash_algo *algop)
 {
@@ -292,6 +395,9 @@ static inline int oideq(const struct object_id *oid1, const struct object_id *oi
 {
 	return !memcmp(oid1->hash, oid2->hash, GIT_MAX_RAWSZ);
 }
+
+unsigned oid_common_prefix_hexlen(const struct object_id *a,
+				  const struct object_id *b);
 
 static inline void oidcpy(struct object_id *dst, const struct object_id *src)
 {

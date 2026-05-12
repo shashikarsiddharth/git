@@ -6,7 +6,7 @@
 #include "sigchain.h"
 #include "string-list.h"
 
-static const char *proc_receive_usage[] = {
+static const char *const proc_receive_usage[] = {
 	"test-tool proc-receive [<options>]",
 	NULL
 };
@@ -195,6 +195,13 @@ int cmd__proc_receive(int argc, const char **argv)
 			packet_write_fmt(1, "%s\n", item->string);
 	packet_flush(1);
 	sigchain_pop(SIGPIPE);
+
+	while (commands) {
+		struct command *next = commands->next;
+		free(commands);
+		commands = next;
+	}
+	string_list_clear(&push_options, 0);
 
 	return 0;
 }

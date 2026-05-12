@@ -7,7 +7,6 @@ test_description='Test merge with directory/file conflicts'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'prepare repository' '
@@ -85,12 +84,7 @@ test_expect_success 'modify/delete + directory/file conflict' '
 
 	test_stdout_line_count = 5 git ls-files -s &&
 	test_stdout_line_count = 4 git ls-files -u &&
-	if test "$GIT_TEST_MERGE_ALGORITHM" = ort
-	then
-		test_stdout_line_count = 0 git ls-files -o
-	else
-		test_stdout_line_count = 1 git ls-files -o
-	fi &&
+	test_stdout_line_count = 0 git ls-files -o &&
 
 	test_path_is_file letters/file &&
 	test_path_is_file letters.txt &&
@@ -106,12 +100,7 @@ test_expect_success 'modify/delete + directory/file conflict; other way' '
 
 	test_stdout_line_count = 5 git ls-files -s &&
 	test_stdout_line_count = 4 git ls-files -u &&
-	if test "$GIT_TEST_MERGE_ALGORITHM" = ort
-	then
-		test_stdout_line_count = 0 git ls-files -o
-	else
-		test_stdout_line_count = 1 git ls-files -o
-	fi &&
+	test_stdout_line_count = 0 git ls-files -o &&
 
 	test_path_is_file letters/file &&
 	test_path_is_file letters.txt &&

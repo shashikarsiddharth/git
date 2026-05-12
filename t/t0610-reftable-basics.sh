@@ -10,10 +10,16 @@ export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 GIT_TEST_DEFAULT_REF_FORMAT=reftable
 export GIT_TEST_DEFAULT_REF_FORMAT
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 INVALID_OID=$(test_oid 001)
+
+test_expect_success 'pack-refs does not crash with -h' '
+	test_expect_code 129 git pack-refs -h >usage &&
+	test_grep "[Uu]sage: git pack-refs " usage &&
+	test_expect_code 129 nongit git pack-refs -h >usage &&
+	test_grep "[Uu]sage: git pack-refs " usage
+'
 
 test_expect_success 'init: creates basic reftable structures' '
 	test_when_finished "rm -rf repo" &&
@@ -201,7 +207,7 @@ test_expect_success 'ref transaction: corrupted tables cause failure' '
 		test_commit file1 &&
 		for f in .git/reftable/*.ref
 		do
-			: >"$f" || return 1
+			test-tool truncate "$f" 0 || return 1
 		done &&
 		test_must_fail git update-ref refs/heads/main HEAD
 	)
@@ -423,6 +429,69 @@ test_expect_success 'ref transaction: fails gracefully when auto compaction fail
 	)
 '
 
+test_expect_success 'ref transaction: timeout acquiring tables.list lock' '
+	test_when_finished "rm -rf repo" &&
+	git init repo &&
+	(
+		cd repo &&
+		test_commit initial &&
+		>.git/reftable/tables.list.lock &&
+		test_must_fail git update-ref refs/heads/branch HEAD 2>err &&
+		test_grep "cannot lock references" err
+	)
+'
+
+test_expect_success 'ref transaction: retry acquiring tables.list lock' '
+	test_when_finished "rm -rf repo" &&
+	git init repo &&
+	(
+		cd repo &&
+		test_commit initial &&
+		LOCK=.git/reftable/tables.list.lock &&
+		>$LOCK &&
+		{
+			( sleep 1 && rm -f $LOCK ) &
+		} &&
+		git -c reftable.lockTimeout=5000 update-ref refs/heads/branch HEAD
+	)
+'
+
+# This test fails most of the time on Cygwin systems. The root cause is
+# that Windows does not allow us to rename the "tables.list.lock" file into
+# place when "tables.list" is open for reading by a concurrent process. We have
+# worked around that in our MinGW-based rename emulation, but the Cygwin
+# emulation seems to be insufficient.
+test_expect_success !CYGWIN 'ref transaction: many concurrent writers' '
+	test_when_finished "rm -rf repo" &&
+	git init repo &&
+	(
+		cd repo &&
+		# Set a high timeout. While a couple of seconds should be
+		# plenty, using the address sanitizer will significantly slow
+		# us down here. So we are aiming way higher than you would ever
+		# think is necessary just to keep us from flaking. We could
+		# also lock indefinitely by passing -1, but that could
+		# potentially block CI jobs indefinitely if there was a bug
+		# here.
+		git config set reftable.lockTimeout 300000 &&
+		test_commit --no-tag initial &&
+
+		head=$(git rev-parse HEAD) &&
+		test_seq -f "$head commit\trefs/heads/branch-%d" 100 >expect &&
+		printf "%s commit\trefs/heads/main\n" "$head" >>expect &&
+
+		for i in $(test_seq 100)
+		do
+			{ git update-ref refs/heads/branch-$i HEAD& } ||
+			return 1
+		done &&
+
+		wait &&
+		git for-each-ref --sort=v:refname >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'pack-refs: compacts tables' '
 	test_when_finished "rm -rf repo" &&
 	git init repo &&
@@ -580,9 +649,8 @@ test_expect_success 'basic: commit and list refs' '
 test_expect_success 'basic: can write large commit message' '
 	test_when_finished "rm -rf repo" &&
 	git init repo &&
-	perl -e "
-		print \"this is a long commit message\" x 50000
-	" >commit-msg &&
+
+	awk "BEGIN { for (i = 0; i < 50000; i++) printf \"%s\", \"this is a long commit message\" }" >commit-msg &&
 	git -C repo commit --allow-empty --file=../commit-msg
 '
 
@@ -1065,6 +1133,34 @@ test_expect_success 'fetch: accessing FETCH_HEAD special ref works' '
 	git -C repo fetch ../sub &&
 	git -C repo rev-parse FETCH_HEAD >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success 'writes do not persist peeled value for invalid tags' '
+	test_when_finished rm -rf repo &&
+	git init repo &&
+	(
+		cd repo &&
+		git commit --allow-empty --message initial &&
+
+		# We cannot easily verify that the peeled value is not stored
+		# in the tables. Instead, we test this indirectly: we create
+		# two tags that both point to the same object, but they claim
+		# different object types. If we parse both tags we notice that
+		# the parsed tagged object has a mismatch between the two tags
+		# and bail out.
+		#
+		# If we instead use the persisted peeled value we would not
+		# even parse the tags. As such, we would not notice the
+		# discrepancy either and thus listing these tags would succeed.
+		git tag tag-1 -m "tag 1" &&
+		git cat-file tag tag-1 >raw-tag &&
+		sed "s/^type commit$/type blob/" <raw-tag >broken-tag &&
+		broken_tag_id=$(git hash-object -w -t tag broken-tag) &&
+		git update-ref refs/tags/tag-2 $broken_tag_id &&
+
+		test_must_fail git for-each-ref --format="%(*objectname)" refs/tags/ 2>err &&
+		test_grep "bad tag pointer" err
+	)
 '
 
 test_done

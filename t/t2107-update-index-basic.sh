@@ -5,7 +5,6 @@ test_description='basic update-index tests
 Tests for command-line parsing and basic operation.
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'update-index --nonsense fails' '
@@ -87,7 +86,7 @@ test_expect_success '.lock files cleaned up' '
 	# the_index.cache_changed is zero, rollback_lock_file fails
 	git update-index --refresh --verbose >out &&
 	test_must_be_empty out &&
-	! test -f .git/index.lock
+	test_path_is_missing .git/index.lock
 	)
 '
 

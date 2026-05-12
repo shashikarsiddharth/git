@@ -7,7 +7,6 @@ test_description='prune'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 day=$((60*60*24))
@@ -363,6 +362,11 @@ test_expect_success 'gc.recentObjectsHook' '
 	git prune --expire=now &&
 
 	git cat-file -p $BLOB
+'
+
+test_expect_success 'prune does not crash with -h' '
+	test_expect_code 129 git prune -h >usage &&
+	test_grep "[Uu]sage: git prune " usage
 '
 
 test_done

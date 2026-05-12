@@ -1,4 +1,4 @@
-#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
 #include "gettext.h"
@@ -6,14 +6,13 @@
 #include "hex.h"
 #include "repository.h"
 #include "hash.h"
-#include "hash.h"
 #include "object.h"
 #include "loose.h"
 #include "commit.h"
 #include "gpg-interface.h"
 #include "object-file-convert.h"
 
-int repo_oid_to_algop(struct repository *repo, const struct object_id *src,
+int repo_oid_to_algop(struct repository *repo, const struct object_id *srcoid,
 		      const struct git_hash_algo *to, struct object_id *dest)
 {
 	/*
@@ -21,9 +20,17 @@ int repo_oid_to_algop(struct repository *repo, const struct object_id *src,
 	 * default hash algorithm for that object.
 	 */
 	const struct git_hash_algo *from =
-		src->algo ? &hash_algos[src->algo] : repo->hash_algo;
+		srcoid->algo ? &hash_algos[srcoid->algo] : repo->hash_algo;
+	struct object_id temp;
+	const struct object_id *src = srcoid;
 
-	if (from == to) {
+	if (!srcoid->algo) {
+		oidcpy(&temp, srcoid);
+		temp.algo = hash_algo_by_ptr(repo->hash_algo);
+		src = &temp;
+	}
+
+	if (from == to || !to) {
 		if (src != dest)
 			oidcpy(dest, src);
 		return 0;
@@ -62,7 +69,8 @@ static int decode_tree_entry_raw(struct object_id *oid, const char **path,
 	return 0;
 }
 
-static int convert_tree_object(struct strbuf *out,
+static int convert_tree_object(struct repository *repo,
+			       struct strbuf *out,
 			       const struct git_hash_algo *from,
 			       const struct git_hash_algo *to,
 			       const char *buffer, size_t size)
@@ -77,7 +85,7 @@ static int convert_tree_object(struct strbuf *out,
 		if (decode_tree_entry_raw(&entry_oid, &path, &pathlen, from, p,
 					  end - p))
 			return error(_("failed to decode tree entry"));
-		if (repo_oid_to_algop(the_repository, &entry_oid, to, &mapped_oid))
+		if (repo_oid_to_algop(repo, &entry_oid, to, &mapped_oid))
 			return error(_("failed to map tree entry for %s"), oid_to_hex(&entry_oid));
 		strbuf_add(out, p, path - p);
 		strbuf_add(out, path, pathlen);
@@ -87,7 +95,8 @@ static int convert_tree_object(struct strbuf *out,
 	return 0;
 }
 
-static int convert_tag_object(struct strbuf *out,
+static int convert_tag_object(struct repository *repo,
+			      struct strbuf *out,
 			      const struct git_hash_algo *from,
 			      const struct git_hash_algo *to,
 			      const char *buffer, size_t size)
@@ -104,7 +113,7 @@ static int convert_tag_object(struct strbuf *out,
 		return error("bogus tag object");
 	if (parse_oid_hex_algop(buffer + 7, &oid, &p, from) < 0)
 		return error("bad tag object ID");
-	if (repo_oid_to_algop(the_repository, &oid, to, &mapped_oid))
+	if (repo_oid_to_algop(repo, &oid, to, &mapped_oid))
 		return error("unable to map tree %s in tag object",
 			     oid_to_hex(&oid));
 	size -= ((p + 1) - buffer);
@@ -138,7 +147,8 @@ static int convert_tag_object(struct strbuf *out,
 	return 0;
 }
 
-static int convert_commit_object(struct strbuf *out,
+static int convert_commit_object(struct repository *repo,
+				 struct strbuf *out,
 				 const struct git_hash_algo *from,
 				 const struct git_hash_algo *to,
 				 const char *buffer, size_t size)
@@ -164,7 +174,7 @@ static int convert_commit_object(struct strbuf *out,
 			    (p != eol))
 				return error(_("bad %s in commit"), "tree");
 
-			if (repo_oid_to_algop(the_repository, &oid, to, &mapped_oid))
+			if (repo_oid_to_algop(repo, &oid, to, &mapped_oid))
 				return error(_("unable to map %s %s in commit object"),
 					     "tree", oid_to_hex(&oid));
 			strbuf_addf(out, "tree %s\n", oid_to_hex(&mapped_oid));
@@ -176,7 +186,7 @@ static int convert_commit_object(struct strbuf *out,
 			    (p != eol))
 				return error(_("bad %s in commit"), "parent");
 
-			if (repo_oid_to_algop(the_repository, &oid, to, &mapped_oid))
+			if (repo_oid_to_algop(repo, &oid, to, &mapped_oid))
 				return error(_("unable to map %s %s in commit object"),
 					     "parent", oid_to_hex(&oid));
 
@@ -201,7 +211,7 @@ static int convert_commit_object(struct strbuf *out,
 			}
 
 			/* Compute the new tag object */
-			if (convert_tag_object(&new_tag, from, to, tag.buf, tag.len)) {
+			if (convert_tag_object(repo, &new_tag, from, to, tag.buf, tag.len)) {
 				strbuf_release(&tag);
 				strbuf_release(&new_tag);
 				return -1;
@@ -240,7 +250,8 @@ static int convert_commit_object(struct strbuf *out,
 	return 0;
 }
 
-int convert_object_file(struct strbuf *outbuf,
+int convert_object_file(struct repository *repo,
+			struct strbuf *outbuf,
 			const struct git_hash_algo *from,
 			const struct git_hash_algo *to,
 			const void *buf, size_t len,
@@ -255,13 +266,13 @@ int convert_object_file(struct strbuf *outbuf,
 
 	switch (type) {
 	case OBJ_COMMIT:
-		ret = convert_commit_object(outbuf, from, to, buf, len);
+		ret = convert_commit_object(repo, outbuf, from, to, buf, len);
 		break;
 	case OBJ_TREE:
-		ret = convert_tree_object(outbuf, from, to, buf, len);
+		ret = convert_tree_object(repo, outbuf, from, to, buf, len);
 		break;
 	case OBJ_TAG:
-		ret = convert_tag_object(outbuf, from, to, buf, len);
+		ret = convert_tag_object(repo, outbuf, from, to, buf, len);
 		break;
 	default:
 		/* Not implemented yet, so fail. */

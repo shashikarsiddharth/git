@@ -18,6 +18,7 @@ enum list_objects_filter_choice {
 	LOFC_SPARSE_OID,
 	LOFC_OBJECT_TYPE,
 	LOFC_COMBINE,
+	LOFC_AUTO,
 	LOFC__COUNT /* must be last */
 };
 
@@ -51,6 +52,11 @@ struct list_objects_filter_options {
 	unsigned int no_filter : 1;
 
 	/*
+	 * Is LOFC_AUTO a valid option?
+	 */
+	unsigned int allow_auto_filter : 1;
+
+	/*
 	 * BEGIN choice-specific parsed values from within the filter-spec. Only
 	 * some values will be defined for any given choice.
 	 */
@@ -82,7 +88,7 @@ void list_objects_filter_init(struct list_objects_filter_options *filter_options
  *       "filter" SP <arg>
  *
  * The filter keyword will be used by many commands.
- * See Documentation/rev-list-options.txt for allowed values for <arg>.
+ * See Documentation/rev-list-options.adoc for allowed values for <arg>.
  *
  * Capture the given arg as the "filter_spec".  This can be forwarded to
  * subordinate commands when necessary (although it's better to pass it through

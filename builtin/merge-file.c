@@ -1,9 +1,13 @@
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "builtin.h"
 #include "abspath.h"
 #include "diff.h"
 #include "hex.h"
+#include "object-file.h"
 #include "object-name.h"
-#include "object-store.h"
+#include "odb.h"
 #include "config.h"
 #include "gettext.h"
 #include "setup.h"
@@ -53,7 +57,10 @@ static int diff_algorithm_cb(const struct option *opt,
 	return 0;
 }
 
-int cmd_merge_file(int argc, const char **argv, const char *prefix)
+int cmd_merge_file(int argc,
+		   const char **argv,
+		   const char *prefix,
+		   struct repository *repo)
 {
 	const char *names[3] = { 0 };
 	mmfile_t mmfs[3] = { 0 };
@@ -88,12 +95,10 @@ int cmd_merge_file(int argc, const char **argv, const char *prefix)
 	xmp.style = 0;
 	xmp.favor = 0;
 
-	if (startup_info->have_repository) {
-		/* Read the configuration file */
-		git_config(git_xmerge_config, NULL);
-		if (0 <= git_xmerge_style)
-			xmp.style = git_xmerge_style;
-	}
+	/* Read the configuration file */
+	repo_config(repo, git_xmerge_config, NULL);
+	if (0 <= git_xmerge_style)
+		xmp.style = git_xmerge_style;
 
 	argc = parse_options(argc, argv, prefix, options, merge_file_usage, 0);
 	if (argc != 3)
@@ -103,7 +108,8 @@ int cmd_merge_file(int argc, const char **argv, const char *prefix)
 			return error_errno("failed to redirect stderr to /dev/null");
 	}
 
-	if (object_id)
+	if (!repo && object_id)
+		/* emit the correct "not a git repo" error in this case */
 		setup_git_directory();
 
 	for (i = 0; i < 3; i++) {
@@ -121,7 +127,7 @@ int cmd_merge_file(int argc, const char **argv, const char *prefix)
 				ret = error(_("object '%s' does not exist"),
 					      argv[i]);
 			else if (!oideq(&oid, the_hash_algo->empty_blob))
-				read_mmblob(mmf, &oid);
+				read_mmblob(mmf, the_repository->objects, &oid);
 			else
 				read_mmfile(mmf, "/dev/null");
 		} else if (read_mmfile(mmf, fname)) {
@@ -148,7 +154,8 @@ int cmd_merge_file(int argc, const char **argv, const char *prefix)
 		if (object_id && !to_stdout) {
 			struct object_id oid;
 			if (result.size) {
-				if (write_object_file(result.ptr, result.size, OBJ_BLOB, &oid) < 0)
+				if (odb_write_object(the_repository->objects, result.ptr,
+						     result.size, OBJ_BLOB, &oid) < 0)
 					ret = error(_("Could not write object file"));
 			} else {
 				oidcpy(&oid, the_hash_algo->empty_blob);

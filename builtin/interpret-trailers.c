@@ -4,8 +4,9 @@
  * Copyright (c) 2013, 2014 Christian Couder <chriscool@tuxfamily.org>
  *
  */
-
+#define USE_THE_REPOSITORY_VARIABLE
 #include "builtin.h"
+#include "environment.h"
 #include "gettext.h"
 #include "parse-options.h"
 #include "string-list.h"
@@ -92,37 +93,6 @@ static int parse_opt_parse(const struct option *opt, const char *arg,
 	return 0;
 }
 
-static struct tempfile *trailers_tempfile;
-
-static FILE *create_in_place_tempfile(const char *file)
-{
-	struct stat st;
-	struct strbuf filename_template = STRBUF_INIT;
-	const char *tail;
-	FILE *outfile;
-
-	if (stat(file, &st))
-		die_errno(_("could not stat %s"), file);
-	if (!S_ISREG(st.st_mode))
-		die(_("file %s is not a regular file"), file);
-	if (!(st.st_mode & S_IWUSR))
-		die(_("file %s is not writable by user"), file);
-
-	/* Create temporary file in the same directory as the original */
-	tail = strrchr(file, '/');
-	if (tail)
-		strbuf_add(&filename_template, file, tail - file + 1);
-	strbuf_addstr(&filename_template, "git-interpret-trailers-XXXXXX");
-
-	trailers_tempfile = xmks_tempfile_m(filename_template.buf, st.st_mode);
-	strbuf_release(&filename_template);
-	outfile = fdopen_tempfile(trailers_tempfile, "w");
-	if (!outfile)
-		die_errno(_("could not open temporary file"));
-
-	return outfile;
-}
-
 static void read_input_file(struct strbuf *sb, const char *file)
 {
 	if (file) {
@@ -132,63 +102,44 @@ static void read_input_file(struct strbuf *sb, const char *file)
 		if (strbuf_read(sb, fileno(stdin), 0) < 0)
 			die_errno(_("could not read from stdin"));
 	}
+	strbuf_complete_line(sb);
 }
 
 static void interpret_trailers(const struct process_trailer_options *opts,
 			       struct list_head *new_trailer_head,
 			       const char *file)
 {
-	LIST_HEAD(head);
-	struct strbuf sb = STRBUF_INIT;
-	struct strbuf trailer_block = STRBUF_INIT;
-	struct trailer_info *info;
-	FILE *outfile = stdout;
+	struct strbuf input = STRBUF_INIT;
+	struct strbuf out = STRBUF_INIT;
+	struct tempfile *tempfile = NULL;
+	int fd = 1;
 
 	trailer_config_init();
 
-	read_input_file(&sb, file);
+	read_input_file(&input, file);
 
-	if (opts->in_place)
-		outfile = create_in_place_tempfile(file);
-
-	info = parse_trailers(opts, sb.buf, &head);
-
-	/* Print the lines before the trailers */
-	if (!opts->only_trailers)
-		fwrite(sb.buf, 1, trailer_block_start(info), outfile);
-
-	if (!opts->only_trailers && !blank_line_before_trailer_block(info))
-		fprintf(outfile, "\n");
-
-
-	if (!opts->only_input) {
-		LIST_HEAD(config_head);
-		LIST_HEAD(arg_head);
-		parse_trailers_from_config(&config_head);
-		parse_trailers_from_command_line_args(&arg_head, new_trailer_head);
-		list_splice(&config_head, &arg_head);
-		process_trailers_lists(&head, &arg_head);
+	if (opts->in_place) {
+		tempfile = trailer_create_in_place_tempfile(file);
+		if (!tempfile)
+			die(NULL);
+		fd = tempfile->fd;
 	}
+	process_trailers(opts, new_trailer_head, &input, &out);
 
-	/* Print trailer block. */
-	format_trailers(opts, &head, &trailer_block);
-	free_trailers(&head);
-	fwrite(trailer_block.buf, 1, trailer_block.len, outfile);
-	strbuf_release(&trailer_block);
-
-	/* Print the lines after the trailers as is */
-	if (!opts->only_trailers)
-		fwrite(sb.buf + trailer_block_end(info), 1, sb.len - trailer_block_end(info), outfile);
-	trailer_info_release(info);
-
+	if (write_in_full(fd, out.buf, out.len) < 0)
+		die_errno(_("could not write to temporary file '%s'"), file);
 	if (opts->in_place)
-		if (rename_tempfile(&trailers_tempfile, file))
+		if (rename_tempfile(&tempfile, file))
 			die_errno(_("could not rename temporary file to %s"), file);
 
-	strbuf_release(&sb);
+	strbuf_release(&input);
+	strbuf_release(&out);
 }
 
-int cmd_interpret_trailers(int argc, const char **argv, const char *prefix)
+int cmd_interpret_trailers(int argc,
+			   const char **argv,
+			   const char *prefix,
+			   struct repository *repo UNUSED)
 {
 	struct process_trailer_options opts = PROCESS_TRAILER_OPTIONS_INIT;
 	LIST_HEAD(trailers);
@@ -205,7 +156,7 @@ int cmd_interpret_trailers(int argc, const char **argv, const char *prefix)
 			     N_("action if trailer is missing"), option_parse_if_missing),
 
 		OPT_BOOL(0, "only-trailers", &opts.only_trailers, N_("output only the trailers")),
-		OPT_BOOL(0, "only-input", &opts.only_input, N_("do not apply trailer.* configuration variables")),
+		OPT_BOOL(0, "only-input", &opts.only_input, N_("do not apply trailer.<key-alias> configuration variables")),
 		OPT_BOOL(0, "unfold", &opts.unfold, N_("reformat multiline trailer values as single-line values")),
 		OPT_CALLBACK_F(0, "parse", &opts, NULL, N_("alias for --only-trailers --only-input --unfold"),
 			PARSE_OPT_NOARG | PARSE_OPT_NONEG, parse_opt_parse),
@@ -215,7 +166,7 @@ int cmd_interpret_trailers(int argc, const char **argv, const char *prefix)
 		OPT_END()
 	};
 
-	git_config(git_default_config, NULL);
+	repo_config(the_repository, git_default_config, NULL);
 
 	argc = parse_options(argc, argv, prefix, options,
 			     git_interpret_trailers_usage, 0);

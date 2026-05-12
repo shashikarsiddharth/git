@@ -8,7 +8,6 @@ test_description='various format-patch tests'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-terminal.sh
 
@@ -381,6 +380,131 @@ test_expect_success 'filename limit applies only to basename' '
 	done
 '
 
+test_expect_success 'cover letter with subject, author and count' '
+	rm -rf patches &&
+	test_when_finished "git reset --hard HEAD~1" &&
+	test_when_finished "rm -rf patches test_file" &&
+	touch test_file &&
+	git add test_file &&
+	git commit -m "This is a subject" &&
+	git format-patch --commit-list-format="log:[%(count)/%(total)] %s (%an)" \
+	-o patches HEAD~1 &&
+	test_grep "^\[1/1\] This is a subject (A U Thor)$" patches/0000-cover-letter.patch
+'
+
+test_expect_success 'cover letter with custom format no prefix' '
+	rm -rf patches &&
+	test_when_finished "git reset --hard HEAD~1" &&
+	test_when_finished "rm -rf patches test_file" &&
+	touch test_file &&
+	git add test_file &&
+	git commit -m "This is a subject" &&
+	git format-patch --commit-list-format="[%(count)/%(total)] %s (%an)" \
+	-o patches HEAD~1 &&
+	test_grep "^\[1/1\] This is a subject (A U Thor)$" patches/0000-cover-letter.patch
+'
+
+test_expect_success 'cover letter fail when no prefix and no placeholder' '
+	rm -rf patches &&
+	test_when_finished "git reset --hard HEAD~1" &&
+	test_when_finished "rm -rf patches test_file err" &&
+	touch test_file &&
+	git add test_file &&
+	git commit -m "This is a subject" &&
+	test_must_fail git format-patch --commit-list-format="this should fail" \
+	-o patches HEAD~1 2>err &&
+	test_grep "is not a valid format string" err
+'
+
+test_expect_success 'cover letter modern format' '
+	test_when_finished "git reset --hard HEAD~1" &&
+	test_when_finished "rm -rf patches test_file" &&
+	touch test_file &&
+	git add test_file &&
+	git commit -m "This is a subject" &&
+	git format-patch --commit-list-format="modern" -o patches HEAD~1 &&
+	test_grep "^\[1/1\] This is a subject$" patches/0000-cover-letter.patch
+'
+
+test_expect_success 'cover letter shortlog format' '
+	test_when_finished "git reset --hard HEAD~1" &&
+	test_when_finished "rm -rf expect patches result test_file" &&
+	cat >expect <<-"EOF" &&
+	A U Thor (1):
+	  This is a subject
+	EOF
+	touch test_file &&
+	git add test_file &&
+	git commit -m "This is a subject" &&
+	git format-patch --commit-list-format=shortlog -o patches HEAD~1 &&
+	grep -E -A 1 "^A U Thor \([[:digit:]]+\):$" patches/0000-cover-letter.patch >result &&
+	cat result &&
+	test_cmp expect result
+'
+
+test_expect_success 'no cover letter but with format specified' '
+	test_when_finished "git reset --hard HEAD~1" &&
+	test_when_finished "rm -rf patches result test_file" &&
+	touch test_file &&
+	git add test_file &&
+	git commit -m "This is a subject" &&
+	git format-patch --no-cover-letter --commit-list-format="[%(count)] %s" -o patches HEAD~1 &&
+	test_path_is_missing patches/0000-cover-letter.patch
+'
+
+test_expect_success 'cover letter config with count, subject and author' '
+	test_when_finished "rm -rf patches result" &&
+	test_when_finished "git config unset format.coverletter" &&
+	test_when_finished "git config unset format.commitlistformat" &&
+	git config set format.coverletter true &&
+	git config set format.commitlistformat "log:[%(count)/%(total)] %s (%an)" &&
+	git format-patch -o patches HEAD~2 &&
+	grep -E "^[[[:digit:]]+/[[:digit:]]+] .* \(A U Thor\)" patches/0000-cover-letter.patch >result &&
+	test_line_count = 2 result
+'
+
+test_expect_success 'cover letter config with count and author' '
+	test_when_finished "rm -rf patches result" &&
+	test_when_finished "git config unset format.coverletter" &&
+	test_when_finished "git config unset format.commitlistformat" &&
+	git config set format.coverletter true &&
+	git config set format.commitlistformat "log:[%(count)/%(total)] (%an)" &&
+	git format-patch -o patches HEAD~2 &&
+	grep -E "^[[[:digit:]]+/[[:digit:]]+] \(A U Thor\)" patches/0000-cover-letter.patch >result &&
+	test_line_count = 2 result
+'
+
+test_expect_success 'cover letter config commitlistformat set to modern' '
+	test_when_finished "rm -rf patches result" &&
+	test_when_finished "git config unset format.coverletter" &&
+	test_when_finished "git config unset format.commitlistformat" &&
+	git config set format.coverletter true &&
+	git config set format.commitlistformat modern &&
+	git format-patch -o patches HEAD~2 &&
+	grep -E "^[[[:digit:]]+/[[:digit:]]+] .*$" patches/0000-cover-letter.patch >result &&
+	test_line_count = 2 result
+'
+
+test_expect_success 'cover letter config commitlistformat set to shortlog' '
+	test_when_finished "rm -rf patches result" &&
+	test_when_finished "git config unset format.coverletter" &&
+	test_when_finished "git config unset format.commitlistformat" &&
+	git config set format.coverletter true &&
+	git config set format.commitlistformat shortlog &&
+	git format-patch -o patches HEAD~2 &&
+	grep -E "^A U Thor \([[:digit:]]+\)" patches/0000-cover-letter.patch >result &&
+	test_line_count = 1 result
+'
+
+test_expect_success 'cover letter config commitlistformat not set' '
+	test_when_finished "rm -rf patches result" &&
+	test_when_finished "git config unset format.coverletter" &&
+	git config set format.coverletter true &&
+	git format-patch -o patches HEAD~2 &&
+	grep -E "^A U Thor \([[:digit:]]+\)" patches/0000-cover-letter.patch >result &&
+	test_line_count = 1 result
+'
+
 test_expect_success 'reroll count' '
 	rm -fr patches &&
 	git format-patch -o patches --cover-letter --reroll-count 4 main..side >list &&
@@ -449,7 +573,7 @@ cat >>expect.no-threading <<EOF
 ---
 EOF
 
-test_expect_success 'no threading' '
+test_expect_success PERL_TEST_HELPERS 'no threading' '
 	git checkout side &&
 	check_threading expect.no-threading main
 '
@@ -467,11 +591,11 @@ In-Reply-To: <0>
 References: <0>
 EOF
 
-test_expect_success 'thread' '
+test_expect_success PERL_TEST_HELPERS 'thread' '
 	check_threading expect.thread --thread main
 '
 
-test_expect_success '--thread overrides format.thread=deep' '
+test_expect_success PERL_TEST_HELPERS '--thread overrides format.thread=deep' '
 	test_config format.thread deep &&
 	check_threading expect.thread --thread main
 '
@@ -491,7 +615,7 @@ In-Reply-To: <1>
 References: <1>
 EOF
 
-test_expect_success 'thread in-reply-to' '
+test_expect_success PERL_TEST_HELPERS 'thread in-reply-to' '
 	check_threading expect.in-reply-to --in-reply-to="<test.message>" \
 		--thread main
 '
@@ -513,7 +637,7 @@ In-Reply-To: <0>
 References: <0>
 EOF
 
-test_expect_success 'thread cover-letter' '
+test_expect_success PERL_TEST_HELPERS 'thread cover-letter' '
 	check_threading expect.cover-letter --cover-letter --thread main
 '
 
@@ -539,12 +663,12 @@ References: <1>
 	<0>
 EOF
 
-test_expect_success 'thread cover-letter in-reply-to' '
+test_expect_success PERL_TEST_HELPERS 'thread cover-letter in-reply-to' '
 	check_threading expect.cl-irt --cover-letter \
 		--in-reply-to="<test.message>" --thread main
 '
 
-test_expect_success 'thread explicit shallow' '
+test_expect_success PERL_TEST_HELPERS 'thread explicit shallow' '
 	check_threading expect.cl-irt --cover-letter \
 		--in-reply-to="<test.message>" --thread=shallow main
 '
@@ -563,7 +687,7 @@ References: <0>
 	<1>
 EOF
 
-test_expect_success 'thread deep' '
+test_expect_success PERL_TEST_HELPERS 'thread deep' '
 	check_threading expect.deep --thread=deep main
 '
 
@@ -585,7 +709,7 @@ References: <1>
 	<2>
 EOF
 
-test_expect_success 'thread deep in-reply-to' '
+test_expect_success PERL_TEST_HELPERS 'thread deep in-reply-to' '
 	check_threading expect.deep-irt  --thread=deep \
 		--in-reply-to="<test.message>" main
 '
@@ -610,7 +734,7 @@ References: <0>
 	<2>
 EOF
 
-test_expect_success 'thread deep cover-letter' '
+test_expect_success PERL_TEST_HELPERS 'thread deep cover-letter' '
 	check_threading expect.deep-cl --cover-letter --thread=deep main
 '
 
@@ -639,27 +763,27 @@ References: <1>
 	<3>
 EOF
 
-test_expect_success 'thread deep cover-letter in-reply-to' '
+test_expect_success PERL_TEST_HELPERS 'thread deep cover-letter in-reply-to' '
 	check_threading expect.deep-cl-irt --cover-letter \
 		--in-reply-to="<test.message>" --thread=deep main
 '
 
-test_expect_success 'thread via config' '
+test_expect_success PERL_TEST_HELPERS 'thread via config' '
 	test_config format.thread true &&
 	check_threading expect.thread main
 '
 
-test_expect_success 'thread deep via config' '
+test_expect_success PERL_TEST_HELPERS 'thread deep via config' '
 	test_config format.thread deep &&
 	check_threading expect.deep main
 '
 
-test_expect_success 'thread config + override' '
+test_expect_success PERL_TEST_HELPERS 'thread config + override' '
 	test_config format.thread deep &&
 	check_threading expect.thread --thread main
 '
 
-test_expect_success 'thread config + --no-thread' '
+test_expect_success PERL_TEST_HELPERS 'thread config + --no-thread' '
 	test_config format.thread deep &&
 	check_threading expect.no-threading --no-thread main
 '
@@ -981,7 +1105,7 @@ test_expect_success 'format-patch --ignore-if-in-upstream HEAD' '
 
 test_expect_success 'get git version' '
 	git_version=$(git --version) &&
-	git_version=${git_version##* }
+	git_version=${git_version#git version }
 '
 
 signature() {
@@ -1286,7 +1410,9 @@ test_expect_success 'format-patch wraps extremely long from-header (rfc2047)' '
 	check_author "Foö Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar"
 '
 
-cat >expect <<'EOF'
+# NOTE: do not quote this heredoc, Dash 0.5.13 has a bug with heredocs
+# that contain multibyte chars.
+cat >expect <<EOF
 From: Foö Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar
  Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo Bar Foo
  Bar Foo Bar Foo Bar Foo Bar <author@example.com>
@@ -1301,7 +1427,9 @@ test_expect_success 'format-patch wraps extremely long from-header (non-ASCII wi
 	test_cmp expect actual
 '
 
-cat >expect <<'EOF'
+# NOTE: do not quote this heredoc, Dash 0.5.13 has a bug with heredocs
+# that contain multibyte chars.
+cat >expect <<EOF
 Subject: [PATCH] Foö
 EOF
 test_expect_success 'subject lines are unencoded with --no-encode-email-headers' '
@@ -1313,7 +1441,9 @@ test_expect_success 'subject lines are unencoded with --no-encode-email-headers'
 	test_cmp expect actual
 '
 
-cat >expect <<'EOF'
+# NOTE: do not quote this heredoc, Dash 0.5.13 has a bug with heredocs
+# that contain multibyte chars.
+cat >expect <<EOF
 Subject: [PATCH] Foö
 EOF
 test_expect_success 'subject lines are unencoded with format.encodeEmailHeaders=false' '
@@ -1473,6 +1603,14 @@ test_expect_success '--from uses committer ident' '
 	test_cmp expect patch.head
 '
 
+test_expect_success '--from applies to cover letter' '
+	test_when_finished "rm -rf patches" &&
+	git format-patch -1 --cover-letter --from="Foo Bar <author@example.com>" -o patches &&
+	echo "From: Foo Bar <author@example.com>" >expect &&
+	grep "^From:" patches/0000-cover-letter.patch >patch.head &&
+	test_cmp expect patch.head
+'
+
 test_expect_success '--from omits redundant in-body header' '
 	git format-patch -1 --stdout --from="A U Thor <author@example.com>" >patch &&
 	cat >expect <<-\EOF &&
@@ -1524,7 +1662,9 @@ test_expect_success 'in-body headers trigger content encoding' '
 	test_env GIT_AUTHOR_NAME="éxötìc" test_commit exotic &&
 	test_when_finished "git reset --hard HEAD^" &&
 	git format-patch -1 --stdout --from >patch &&
-	cat >expect <<-\EOF &&
+	# NOTE: do not quote this heredoc, Dash 0.5.13 has a bug with heredocs
+	# that contain multibyte chars.
+	cat >expect <<-EOF &&
 	From: C O Mitter <committer@example.com>
 	Content-Type: text/plain; charset=UTF-8
 
@@ -2542,10 +2682,26 @@ test_expect_success 'format-patch respects format.noprefix' '
 	grep "^--- blorp" actual
 '
 
+test_expect_success 'format.noprefix=false' '
+	git -c format.noprefix=false format-patch -1 --stdout >actual &&
+	grep "^--- a/blorp" actual
+'
+
 test_expect_success 'format-patch --default-prefix overrides format.noprefix' '
 	git -c format.noprefix \
 		format-patch -1 --default-prefix --stdout >actual &&
 	grep "^--- a/blorp" actual
+'
+
+test_expect_success 'errors on format.noprefix which is not boolean' '
+	cat >expect <<-EOF &&
+	fatal: bad boolean config value ${SQ}not-a-bool${SQ} for ${SQ}format.noprefix${SQ}
+	hint: ${SQ}format.noprefix${SQ} used to accept any value and treat that as ${SQ}true${SQ}.
+	hint: Now it only accepts boolean values, like what ${SQ}diff.noprefix${SQ} does.
+	EOF
+	test_must_fail git -c format.noprefix=not-a-bool \
+		format-patch -1 --stdout 2>actual &&
+	test_cmp expect actual
 '
 
 test_done

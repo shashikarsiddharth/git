@@ -3,7 +3,6 @@
 test_description='basic checkout-index tests
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'checkout-index --gobbledegook' '
@@ -20,6 +19,13 @@ test_expect_success 'checkout-index -h in broken repository' '
 		test_expect_code 129 git checkout-index -h >usage 2>&1
 	) &&
 	test_grep "[Uu]sage" broken/usage
+'
+
+test_expect_success 'checkout-index does not crash with -h' '
+	test_expect_code 129 git checkout-index -h >usage &&
+	test_grep "[Uu]sage: git checkout-index " usage &&
+	test_expect_code 129 nongit git checkout-index -h >usage &&
+	test_grep "[Uu]sage: git checkout-index " usage
 '
 
 test_expect_success 'checkout-index reports errors (cmdline)' '

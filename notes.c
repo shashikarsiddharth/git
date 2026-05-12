@@ -1,12 +1,14 @@
 #define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
 #include "config.h"
 #include "environment.h"
 #include "hex.h"
 #include "notes.h"
+#include "object-file.h"
 #include "object-name.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "utf8.h"
 #include "strbuf.h"
 #include "tree-walk.h"
@@ -680,7 +682,8 @@ static int tree_write_stack_finish_subtree(struct tree_write_stack *tws)
 		ret = tree_write_stack_finish_subtree(n);
 		if (ret)
 			return ret;
-		ret = write_object_file(n->buf.buf, n->buf.len, OBJ_TREE, &s);
+		ret = odb_write_object(the_repository->objects, n->buf.buf,
+				       n->buf.len, OBJ_TREE, &s);
 		if (ret)
 			return ret;
 		strbuf_release(&n->buf);
@@ -792,7 +795,8 @@ static int prune_notes_helper(const struct object_id *object_oid,
 	struct note_delete_list **l = (struct note_delete_list **) cb_data;
 	struct note_delete_list *n;
 
-	if (repo_has_object_file(the_repository, object_oid))
+	if (odb_has_object(the_repository->objects, object_oid,
+			   ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR))
 		return 0; /* nothing to do for this note */
 
 	/* failed to find object => prune this note */
@@ -813,15 +817,15 @@ int combine_notes_concatenate(struct object_id *cur_oid,
 
 	/* read in both note blob objects */
 	if (!is_null_oid(new_oid))
-		new_msg = repo_read_object_file(the_repository, new_oid,
-						&new_type, &new_len);
+		new_msg = odb_read_object(the_repository->objects, new_oid,
+					  &new_type, &new_len);
 	if (!new_msg || !new_len || new_type != OBJ_BLOB) {
 		free(new_msg);
 		return 0;
 	}
 	if (!is_null_oid(cur_oid))
-		cur_msg = repo_read_object_file(the_repository, cur_oid,
-						&cur_type, &cur_len);
+		cur_msg = odb_read_object(the_repository->objects, cur_oid,
+					  &cur_type, &cur_len);
 	if (!cur_msg || !cur_len || cur_type != OBJ_BLOB) {
 		free(cur_msg);
 		free(new_msg);
@@ -844,7 +848,8 @@ int combine_notes_concatenate(struct object_id *cur_oid,
 	free(new_msg);
 
 	/* create a new blob object from buf */
-	ret = write_object_file(buf, buf_len, OBJ_BLOB, cur_oid);
+	ret = odb_write_object(the_repository->objects, buf,
+			       buf_len, OBJ_BLOB, cur_oid);
 	free(buf);
 	return ret;
 }
@@ -877,7 +882,7 @@ static int string_list_add_note_lines(struct string_list *list,
 		return 0;
 
 	/* read_sha1_file NUL-terminates */
-	data = repo_read_object_file(the_repository, oid, &t, &len);
+	data = odb_read_object(the_repository->objects, oid, &t, &len);
 	if (t != OBJ_BLOB || !data || !len) {
 		free(data);
 		return t != OBJ_BLOB || !data;
@@ -889,7 +894,7 @@ static int string_list_add_note_lines(struct string_list *list,
 	 * later, along with any empty strings that came from empty
 	 * lines within the file.
 	 */
-	string_list_split(list, data, '\n', -1);
+	string_list_split(list, data, "\n", -1);
 	free(data);
 	return 0;
 }
@@ -916,15 +921,15 @@ int combine_notes_cat_sort_uniq(struct object_id *cur_oid,
 	if (string_list_add_note_lines(&sort_uniq_list, new_oid))
 		goto out;
 	string_list_remove_empty_items(&sort_uniq_list, 0);
-	string_list_sort(&sort_uniq_list);
-	string_list_remove_duplicates(&sort_uniq_list, 0);
+	string_list_sort_u(&sort_uniq_list, 0);
 
 	/* create a new blob object from sort_uniq_list */
 	if (for_each_string_list(&sort_uniq_list,
 				 string_list_join_lines_helper, &buf))
 		goto out;
 
-	ret = write_object_file(buf.buf, buf.len, OBJ_BLOB, cur_oid);
+	ret = odb_write_object(the_repository->objects, buf.buf,
+			       buf.len, OBJ_BLOB, cur_oid);
 
 out:
 	strbuf_release(&buf);
@@ -932,13 +937,11 @@ out:
 	return ret;
 }
 
-static int string_list_add_one_ref(const char *refname, const char *referent UNUSED,
-				   const struct object_id *oid UNUSED,
-				   int flag UNUSED, void *cb)
+static int string_list_add_one_ref(const struct reference *ref, void *cb)
 {
 	struct string_list *refs = cb;
-	if (!unsorted_string_list_has_string(refs, refname))
-		string_list_append(refs, refname);
+	if (!unsorted_string_list_has_string(refs, ref->name))
+		string_list_append(refs, ref->name);
 	return 0;
 }
 
@@ -949,8 +952,11 @@ void string_list_add_refs_by_glob(struct string_list *list, const char *glob)
 {
 	assert(list->strdup_strings);
 	if (has_glob_specials(glob)) {
-		refs_for_each_glob_ref(get_main_ref_store(the_repository),
-				       string_list_add_one_ref, glob, list);
+		struct refs_for_each_ref_options opts = {
+			.pattern = glob,
+		};
+		refs_for_each_ref_ext(get_main_ref_store(the_repository),
+				      string_list_add_one_ref, list, &opts);
 	} else {
 		struct object_id oid;
 		if (repo_get_oid(the_repository, glob, &oid))
@@ -967,8 +973,8 @@ void string_list_add_refs_from_colon_sep(struct string_list *list,
 	char *globs_copy = xstrdup(globs);
 	int i;
 
-	string_list_split_in_place(&split, globs_copy, ":", -1);
-	string_list_remove_empty_items(&split, 0);
+	string_list_split_in_place_f(&split, globs_copy, ":", -1,
+				     STRING_LIST_SPLIT_NONEMPTY);
 
 	for (i = 0; i < split.nr; i++)
 		string_list_add_refs_by_glob(list, split.items[i].string);
@@ -992,15 +998,16 @@ static int notes_display_config(const char *k, const char *v,
 	return 0;
 }
 
-const char *default_notes_ref(void)
+char *default_notes_ref(struct repository *repo)
 {
-	const char *notes_ref = NULL;
+	char *notes_ref = NULL;
+
 	if (!notes_ref)
-		notes_ref = getenv(GIT_NOTES_REF_ENVIRONMENT);
+		notes_ref = xstrdup_or_null(getenv(GIT_NOTES_REF_ENVIRONMENT));
 	if (!notes_ref)
-		notes_ref = notes_ref_name; /* value of core.notesRef config */
+		repo_config_get_string(repo, "core.notesref", &notes_ref);
 	if (!notes_ref)
-		notes_ref = GIT_NOTES_DEFAULT_REF;
+		notes_ref = xstrdup(GIT_NOTES_DEFAULT_REF);
 	return notes_ref;
 }
 
@@ -1010,13 +1017,14 @@ void init_notes(struct notes_tree *t, const char *notes_ref,
 	struct object_id oid, object_oid;
 	unsigned short mode;
 	struct leaf_node root_tree;
+	char *to_free = NULL;
 
 	if (!t)
 		t = &default_notes_tree;
 	assert(!t->initialized);
 
 	if (!notes_ref)
-		notes_ref = default_notes_ref();
+		notes_ref = to_free = default_notes_ref(the_repository);
 	update_ref_namespace(NAMESPACE_NOTES, xstrdup(notes_ref));
 
 	if (!combine_notes)
@@ -1033,7 +1041,7 @@ void init_notes(struct notes_tree *t, const char *notes_ref,
 
 	if (flags & NOTES_INIT_EMPTY ||
 	    repo_get_oid_treeish(the_repository, notes_ref, &object_oid))
-		return;
+		goto out;
 	if (flags & NOTES_INIT_WRITABLE && refs_read_ref(get_main_ref_store(the_repository), notes_ref, &object_oid))
 		die("Cannot use notes ref %s", notes_ref);
 	if (get_tree_entry(the_repository, &object_oid, "", &oid, &mode))
@@ -1043,6 +1051,9 @@ void init_notes(struct notes_tree *t, const char *notes_ref,
 	oidclr(&root_tree.key_oid, the_repository->hash_algo);
 	oidcpy(&root_tree.val_oid, &oid);
 	load_subtree(t, &root_tree, t->root, 0);
+
+out:
+	free(to_free);
 }
 
 struct notes_tree **load_notes_trees(struct string_list *refs, int flags)
@@ -1105,7 +1116,7 @@ void load_display_notes(struct display_notes_opt *opt)
 
 	if (!opt || opt->use_default_notes > 0 ||
 	    (opt->use_default_notes == -1 && !opt->extra_notes_refs.nr)) {
-		string_list_append(&display_notes_refs, default_notes_ref());
+		string_list_append_nodup(&display_notes_refs, default_notes_ref(the_repository));
 		display_ref_env = getenv(GIT_NOTES_DISPLAY_REF_ENVIRONMENT);
 		if (display_ref_env) {
 			string_list_add_refs_from_colon_sep(&display_notes_refs,
@@ -1115,7 +1126,7 @@ void load_display_notes(struct display_notes_opt *opt)
 			load_config_refs = 1;
 	}
 
-	git_config(notes_display_config, &load_config_refs);
+	repo_config(the_repository, notes_display_config, &load_config_refs);
 
 	if (opt) {
 		struct string_list_item *item;
@@ -1207,7 +1218,8 @@ int write_notes_tree(struct notes_tree *t, struct object_id *result)
 	ret = for_each_note(t, flags, write_each_note, &cb_data) ||
 	      write_each_non_note_until(NULL, &cb_data) ||
 	      tree_write_stack_finish_subtree(&root) ||
-	      write_object_file(root.buf.buf, root.buf.len, OBJ_TREE, result);
+	      odb_write_object(the_repository->objects, root.buf.buf,
+			       root.buf.len, OBJ_TREE, result);
 	strbuf_release(&root.buf);
 	return ret;
 }
@@ -1282,7 +1294,8 @@ static void format_note(struct notes_tree *t, const struct object_id *object_oid
 	if (!oid)
 		return;
 
-	if (!(msg = repo_read_object_file(the_repository, oid, &type, &msglen)) || type != OBJ_BLOB) {
+	if (!(msg = odb_read_object(the_repository->objects, oid, &type, &msglen)) ||
+	    type != OBJ_BLOB) {
 		free(msg);
 		return;
 	}
@@ -1347,7 +1360,7 @@ int copy_note(struct notes_tree *t,
 	if (note)
 		return add_note(t, to_obj, note, combine_notes);
 	else if (existing_note)
-		return add_note(t, to_obj, null_oid(), combine_notes);
+		return add_note(t, to_obj, null_oid(the_hash_algo), combine_notes);
 
 	return 0;
 }

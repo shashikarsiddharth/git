@@ -4,7 +4,6 @@
 
 #include "git-compat-util.h"
 #include "abspath.h"
-#include "environment.h"
 #include "gettext.h"
 #include "repository.h"
 #include "strbuf.h"
@@ -15,7 +14,7 @@
 #include "submodule-config.h"
 #include "path.h"
 #include "packfile.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "lockfile.h"
 #include "exec-cmd.h"
 
@@ -28,7 +27,7 @@ static int get_st_mode_bits(const char *path, int *mode)
 	return 0;
 }
 
-struct strbuf *get_pathname(void)
+static struct strbuf *get_pathname(void)
 {
 	static struct strbuf pathname_array[4] = {
 		STRBUF_INIT, STRBUF_INIT, STRBUF_INIT, STRBUF_INIT
@@ -57,9 +56,9 @@ static void strbuf_cleanup_path(struct strbuf *sb)
 		strbuf_remove(sb, 0, path - sb->buf);
 }
 
-static int dir_prefix(const char *buf, const char *dir)
+int dir_prefix(const char *buf, const char *dir)
 {
-	int len = strlen(dir);
+	size_t len = strlen(dir);
 	return !strncmp(buf, dir, len) &&
 		(is_dir_sep(buf[len]) || buf[len] == '\0');
 }
@@ -385,10 +384,11 @@ void report_linked_checkout_garbage(struct repository *r)
 	strbuf_release(&sb);
 }
 
-static void adjust_git_path(const struct repository *repo,
+static void adjust_git_path(struct repository *repo,
 			    struct strbuf *buf, int git_dir_len)
 {
 	const char *base = buf->buf + git_dir_len;
+
 	if (is_dir_file(base, "info", "grafts"))
 		strbuf_splice(buf, 0, buf->len,
 			      repo->graft_file, strlen(repo->graft_file));
@@ -396,9 +396,9 @@ static void adjust_git_path(const struct repository *repo,
 		strbuf_splice(buf, 0, buf->len,
 			      repo->index_file, strlen(repo->index_file));
 	else if (dir_prefix(base, "objects"))
-		replace_dir(buf, git_dir_len + 7, repo->objects->odb->path);
-	else if (git_hooks_path && dir_prefix(base, "hooks"))
-		replace_dir(buf, git_dir_len + 5, git_hooks_path);
+		replace_dir(buf, git_dir_len + 7, repo->objects->sources->path);
+	else if (repo_settings_get_hooks_path(repo) && dir_prefix(base, "hooks"))
+		replace_dir(buf, git_dir_len + 5, repo_settings_get_hooks_path(repo));
 	else if (repo->different_commondir)
 		update_common_dir(buf, git_dir_len, repo->commondir);
 }
@@ -412,12 +412,12 @@ static void strbuf_worktree_gitdir(struct strbuf *buf,
 	else if (!wt->id)
 		strbuf_addstr(buf, repo->commondir);
 	else
-		strbuf_git_common_path(buf, repo, "worktrees/%s", wt->id);
+		repo_common_path_append(repo, buf, "worktrees/%s", wt->id);
 }
 
-void repo_git_pathv(const struct repository *repo,
-		    const struct worktree *wt, struct strbuf *buf,
-		    const char *fmt, va_list args)
+static void repo_git_pathv(struct repository *repo,
+			   const struct worktree *wt, struct strbuf *buf,
+			   const char *fmt, va_list args)
 {
 	int gitdir_len;
 	strbuf_worktree_gitdir(buf, repo, wt);
@@ -430,7 +430,7 @@ void repo_git_pathv(const struct repository *repo,
 	strbuf_cleanup_path(buf);
 }
 
-char *repo_git_path(const struct repository *repo,
+char *repo_git_path(struct repository *repo,
 		    const char *fmt, ...)
 {
 	struct strbuf path = STRBUF_INIT;
@@ -441,14 +441,27 @@ char *repo_git_path(const struct repository *repo,
 	return strbuf_detach(&path, NULL);
 }
 
-void strbuf_repo_git_path(struct strbuf *sb,
-			  const struct repository *repo,
-			  const char *fmt, ...)
+const char *repo_git_path_append(struct repository *repo,
+				 struct strbuf *sb,
+				 const char *fmt, ...)
 {
 	va_list args;
 	va_start(args, fmt);
 	repo_git_pathv(repo, NULL, sb, fmt, args);
 	va_end(args);
+	return sb->buf;
+}
+
+const char *repo_git_path_replace(struct repository *repo,
+				  struct strbuf *sb,
+				  const char *fmt, ...)
+{
+	va_list args;
+	strbuf_reset(sb);
+	va_start(args, fmt);
+	repo_git_pathv(repo, NULL, sb, fmt, args);
+	va_end(args);
+	return sb->buf;
 }
 
 char *mkpathdup(const char *fmt, ...)
@@ -472,17 +485,16 @@ const char *mkpath(const char *fmt, ...)
 	return cleanup_path(pathname->buf);
 }
 
-const char *worktree_git_path(struct repository *r,
-			      const struct worktree *wt, const char *fmt, ...)
+const char *worktree_git_path(const struct worktree *wt, const char *fmt, ...)
 {
 	struct strbuf *pathname = get_pathname();
 	va_list args;
 
-	if (wt && wt->repo != r)
-		BUG("worktree not connected to expected repository");
+	if (!wt)
+		BUG("%s() called with NULL worktree", __func__);
 
 	va_start(args, fmt);
-	repo_git_pathv(r, wt, pathname, fmt, args);
+	repo_git_pathv(wt->repo, wt, pathname, fmt, args);
 	va_end(args);
 	return pathname->buf;
 }
@@ -504,9 +516,6 @@ char *repo_worktree_path(const struct repository *repo, const char *fmt, ...)
 	struct strbuf path = STRBUF_INIT;
 	va_list args;
 
-	if (!repo->worktree)
-		return NULL;
-
 	va_start(args, fmt);
 	do_worktree_path(repo, &path, fmt, args);
 	va_end(args);
@@ -514,29 +523,49 @@ char *repo_worktree_path(const struct repository *repo, const char *fmt, ...)
 	return strbuf_detach(&path, NULL);
 }
 
-void strbuf_repo_worktree_path(struct strbuf *sb,
-			       const struct repository *repo,
-			       const char *fmt, ...)
+const char *repo_worktree_path_append(const struct repository *repo,
+				      struct strbuf *sb,
+				      const char *fmt, ...)
 {
 	va_list args;
 
 	if (!repo->worktree)
-		return;
+		return NULL;
 
 	va_start(args, fmt);
 	do_worktree_path(repo, sb, fmt, args);
 	va_end(args);
+
+	return sb->buf;
+}
+
+const char *repo_worktree_path_replace(const struct repository *repo,
+				       struct strbuf *sb,
+				       const char *fmt, ...)
+{
+	va_list args;
+
+	strbuf_reset(sb);
+	if (!repo->worktree)
+		return NULL;
+
+	va_start(args, fmt);
+	do_worktree_path(repo, sb, fmt, args);
+	va_end(args);
+
+	return sb->buf;
 }
 
 /* Returns 0 on success, negative on failure. */
-static int do_submodule_path(struct strbuf *buf, const char *path,
+static int do_submodule_path(struct repository *repo,
+			     struct strbuf *buf, const char *path,
 			     const char *fmt, va_list args)
 {
 	struct strbuf git_submodule_common_dir = STRBUF_INIT;
 	struct strbuf git_submodule_dir = STRBUF_INIT;
 	int ret;
 
-	ret = submodule_to_gitdir(&git_submodule_dir, path);
+	ret = submodule_to_gitdir(repo, &git_submodule_dir, path);
 	if (ret)
 		goto cleanup;
 
@@ -555,13 +584,14 @@ cleanup:
 	return ret;
 }
 
-char *git_pathdup_submodule(const char *path, const char *fmt, ...)
+char *repo_submodule_path(struct repository *repo,
+			  const char *path, const char *fmt, ...)
 {
 	int err;
 	va_list args;
 	struct strbuf buf = STRBUF_INIT;
 	va_start(args, fmt);
-	err = do_submodule_path(&buf, path, fmt, args);
+	err = do_submodule_path(repo, &buf, path, fmt, args);
 	va_end(args);
 	if (err) {
 		strbuf_release(&buf);
@@ -570,22 +600,41 @@ char *git_pathdup_submodule(const char *path, const char *fmt, ...)
 	return strbuf_detach(&buf, NULL);
 }
 
-int strbuf_git_path_submodule(struct strbuf *buf, const char *path,
-			      const char *fmt, ...)
+const char *repo_submodule_path_append(struct repository *repo,
+				       struct strbuf *buf,
+				       const char *path,
+				       const char *fmt, ...)
 {
 	int err;
 	va_list args;
 	va_start(args, fmt);
-	err = do_submodule_path(buf, path, fmt, args);
+	err = do_submodule_path(repo, buf, path, fmt, args);
 	va_end(args);
-
-	return err;
+	if (err)
+		return NULL;
+	return buf->buf;
 }
 
-void repo_common_pathv(const struct repository *repo,
-		       struct strbuf *sb,
-		       const char *fmt,
-		       va_list args)
+const char *repo_submodule_path_replace(struct repository *repo,
+					struct strbuf *buf,
+					const char *path,
+					const char *fmt, ...)
+{
+	int err;
+	va_list args;
+	strbuf_reset(buf);
+	va_start(args, fmt);
+	err = do_submodule_path(repo, buf, path, fmt, args);
+	va_end(args);
+	if (err)
+		return NULL;
+	return buf->buf;
+}
+
+static void repo_common_pathv(const struct repository *repo,
+			      struct strbuf *sb,
+			      const char *fmt,
+			      va_list args)
 {
 	strbuf_addstr(sb, repo->commondir);
 	if (sb->len && !is_dir_sep(sb->buf[sb->len - 1]))
@@ -594,14 +643,38 @@ void repo_common_pathv(const struct repository *repo,
 	strbuf_cleanup_path(sb);
 }
 
-void strbuf_git_common_path(struct strbuf *sb,
-			    const struct repository *repo,
-			    const char *fmt, ...)
+char *repo_common_path(const struct repository *repo,
+		       const char *fmt, ...)
+{
+	struct strbuf sb = STRBUF_INIT;
+	va_list args;
+	va_start(args, fmt);
+	repo_common_pathv(repo, &sb, fmt, args);
+	va_end(args);
+	return strbuf_detach(&sb, NULL);
+}
+
+const char *repo_common_path_append(const struct repository *repo,
+				    struct strbuf *sb,
+				    const char *fmt, ...)
 {
 	va_list args;
 	va_start(args, fmt);
 	repo_common_pathv(repo, sb, fmt, args);
 	va_end(args);
+	return sb->buf;
+}
+
+const char *repo_common_path_replace(const struct repository *repo,
+				     struct strbuf *sb,
+				     const char *fmt, ...)
+{
+	va_list args;
+	strbuf_reset(sb);
+	va_start(args, fmt);
+	repo_common_pathv(repo, sb, fmt, args);
+	va_end(args);
+	return sb->buf;
 }
 
 static struct passwd *getpw_str(const char *username, size_t len)
@@ -663,119 +736,22 @@ return_null:
 	return NULL;
 }
 
-/*
- * First, one directory to try is determined by the following algorithm.
- *
- * (0) If "strict" is given, the path is used as given and no DWIM is
- *     done. Otherwise:
- * (1) "~/path" to mean path under the running user's home directory;
- * (2) "~user/path" to mean path under named user's home directory;
- * (3) "relative/path" to mean cwd relative directory; or
- * (4) "/absolute/path" to mean absolute directory.
- *
- * Unless "strict" is given, we check "%s/.git", "%s", "%s.git/.git", "%s.git"
- * in this order. We select the first one that is a valid git repository, and
- * chdir() to it. If none match, or we fail to chdir, we return NULL.
- *
- * If all goes well, we return the directory we used to chdir() (but
- * before ~user is expanded), avoiding getcwd() resolving symbolic
- * links.  User relative paths are also returned as they are given,
- * except DWIM suffixing.
- */
-const char *enter_repo(const char *path, int strict)
-{
-	static struct strbuf validated_path = STRBUF_INIT;
-	static struct strbuf used_path = STRBUF_INIT;
-
-	if (!path)
-		return NULL;
-
-	if (!strict) {
-		static const char *suffix[] = {
-			"/.git", "", ".git/.git", ".git", NULL,
-		};
-		const char *gitfile;
-		int len = strlen(path);
-		int i;
-		while ((1 < len) && (path[len-1] == '/'))
-			len--;
-
-		/*
-		 * We can handle arbitrary-sized buffers, but this remains as a
-		 * sanity check on untrusted input.
-		 */
-		if (PATH_MAX <= len)
-			return NULL;
-
-		strbuf_reset(&used_path);
-		strbuf_reset(&validated_path);
-		strbuf_add(&used_path, path, len);
-		strbuf_add(&validated_path, path, len);
-
-		if (used_path.buf[0] == '~') {
-			char *newpath = interpolate_path(used_path.buf, 0);
-			if (!newpath)
-				return NULL;
-			strbuf_attach(&used_path, newpath, strlen(newpath),
-				      strlen(newpath));
-		}
-		for (i = 0; suffix[i]; i++) {
-			struct stat st;
-			size_t baselen = used_path.len;
-			strbuf_addstr(&used_path, suffix[i]);
-			if (!stat(used_path.buf, &st) &&
-			    (S_ISREG(st.st_mode) ||
-			    (S_ISDIR(st.st_mode) && is_git_directory(used_path.buf)))) {
-				strbuf_addstr(&validated_path, suffix[i]);
-				break;
-			}
-			strbuf_setlen(&used_path, baselen);
-		}
-		if (!suffix[i])
-			return NULL;
-		gitfile = read_gitfile(used_path.buf);
-		die_upon_dubious_ownership(gitfile, NULL, used_path.buf);
-		if (gitfile) {
-			strbuf_reset(&used_path);
-			strbuf_addstr(&used_path, gitfile);
-		}
-		if (chdir(used_path.buf))
-			return NULL;
-		path = validated_path.buf;
-	}
-	else {
-		const char *gitfile = read_gitfile(path);
-		die_upon_dubious_ownership(gitfile, NULL, path);
-		if (gitfile)
-			path = gitfile;
-		if (chdir(path))
-			return NULL;
-	}
-
-	if (is_git_directory(".")) {
-		set_git_dir(".", 0);
-		check_repository_format(NULL);
-		return path;
-	}
-
-	return NULL;
-}
-
-int calc_shared_perm(int mode)
+int calc_shared_perm(struct repository *repo,
+		     int mode)
 {
 	int tweak;
-
-	if (get_shared_repository() < 0)
-		tweak = -get_shared_repository();
+	int shared_repo = repo_settings_get_shared_repository(repo);
+	if (shared_repo < 0)
+		tweak = -shared_repo;
 	else
-		tweak = get_shared_repository();
+		tweak = shared_repo;
 
 	if (!(mode & S_IWUSR))
 		tweak &= ~0222;
 	if (mode & S_IXUSR)
 		/* Copy read bits to execute bits */
 		tweak |= (tweak & 0444) >> 2;
-	if (get_shared_repository() < 0)
+	if (shared_repo < 0)
 		mode = (mode & ~0777) | tweak;
 	else
 		mode |= tweak;
@@ -783,17 +759,17 @@ int calc_shared_perm(int mode)
 	return mode;
 }
 
-
-int adjust_shared_perm(const char *path)
+int adjust_shared_perm(struct repository *repo,
+		       const char *path)
 {
 	int old_mode, new_mode;
 
-	if (!get_shared_repository())
+	if (!repo_settings_get_shared_repository(repo))
 		return 0;
 	if (get_st_mode_bits(path, &old_mode) < 0)
 		return -1;
 
-	new_mode = calc_shared_perm(old_mode);
+	new_mode = calc_shared_perm(repo, old_mode);
 	if (S_ISDIR(old_mode)) {
 		/* Copy read bits to execute bits */
 		new_mode |= (new_mode & 0444) >> 2;
@@ -812,7 +788,7 @@ int adjust_shared_perm(const char *path)
 	return 0;
 }
 
-void safe_create_dir(const char *dir, int share)
+void safe_create_dir(struct repository *repo, const char *dir, int share)
 {
 	if (mkdir(dir, 0777) < 0) {
 		if (errno != EEXIST) {
@@ -820,8 +796,131 @@ void safe_create_dir(const char *dir, int share)
 			exit(1);
 		}
 	}
-	else if (share && adjust_shared_perm(dir))
+	else if (share && adjust_shared_perm(repo, dir))
 		die(_("Could not make %s writable by group"), dir);
+}
+
+int safe_create_dir_in_gitdir(struct repository *repo, const char *path)
+{
+	if (mkdir(path, 0777)) {
+		int saved_errno = errno;
+		struct stat st;
+		struct strbuf sb = STRBUF_INIT;
+
+		if (errno != EEXIST)
+			return -1;
+		/*
+		 * Are we looking at a path in a symlinked worktree
+		 * whose original repository does not yet have it?
+		 * e.g. .git/rr-cache pointing at its original
+		 * repository in which the user hasn't performed any
+		 * conflict resolution yet?
+		 */
+		if (lstat(path, &st) || !S_ISLNK(st.st_mode) ||
+		    strbuf_readlink(&sb, path, st.st_size) ||
+		    !is_absolute_path(sb.buf) ||
+		    mkdir(sb.buf, 0777)) {
+			strbuf_release(&sb);
+			errno = saved_errno;
+			return -1;
+		}
+		strbuf_release(&sb);
+	}
+	return adjust_shared_perm(repo, path);
+}
+
+static enum scld_error safe_create_leading_directories_1(struct repository *repo,
+							 char *path)
+{
+	char *next_component = path + offset_1st_component(path);
+	enum scld_error ret = SCLD_OK;
+
+	while (ret == SCLD_OK && next_component) {
+		struct stat st;
+		char *slash = next_component, slash_character;
+
+		while (*slash && !is_dir_sep(*slash))
+			slash++;
+
+		if (!*slash)
+			break;
+
+		next_component = slash + 1;
+		while (is_dir_sep(*next_component))
+			next_component++;
+		if (!*next_component)
+			break;
+
+		slash_character = *slash;
+		*slash = '\0';
+		if (!stat(path, &st)) {
+			/* path exists */
+			if (!S_ISDIR(st.st_mode)) {
+				errno = ENOTDIR;
+				ret = SCLD_EXISTS;
+			}
+		} else if (mkdir(path, 0777)) {
+			if (errno == EEXIST &&
+			    !stat(path, &st) && S_ISDIR(st.st_mode))
+				; /* somebody created it since we checked */
+			else if (errno == ENOENT)
+				/*
+				 * Either mkdir() failed because
+				 * somebody just pruned the containing
+				 * directory, or stat() failed because
+				 * the file that was in our way was
+				 * just removed.  Either way, inform
+				 * the caller that it might be worth
+				 * trying again:
+				 */
+				ret = SCLD_VANISHED;
+			else
+				ret = SCLD_FAILED;
+		} else if (repo && adjust_shared_perm(repo, path)) {
+			ret = SCLD_PERMS;
+		}
+		*slash = slash_character;
+	}
+	return ret;
+}
+
+enum scld_error safe_create_leading_directories(struct repository *repo,
+						char *path)
+{
+	return safe_create_leading_directories_1(repo, path);
+}
+
+enum scld_error safe_create_leading_directories_no_share(char *path)
+{
+	return safe_create_leading_directories_1(NULL, path);
+}
+
+enum scld_error safe_create_leading_directories_const(struct repository *repo,
+						      const char *path)
+{
+	int save_errno;
+	/* path points to cache entries, so xstrdup before messing with it */
+	char *buf = xstrdup(path);
+	enum scld_error result = safe_create_leading_directories(repo, buf);
+
+	save_errno = errno;
+	free(buf);
+	errno = save_errno;
+	return result;
+}
+
+int safe_create_file_with_leading_directories(struct repository *repo,
+					      const char *path)
+{
+	int fd;
+
+	fd = open(path, O_RDWR|O_CREAT|O_EXCL, 0600);
+	if (0 <= fd)
+		return fd;
+
+	/* slow path */
+	safe_create_leading_directories_const(repo, path);
+	return open(path, O_RDWR|O_CREAT|O_EXCL, 0600);
 }
 
 static int have_same_root(const char *path1, const char *path2)
@@ -1011,6 +1110,14 @@ const char *remove_leading_path(const char *in, const char *prefix)
  * end with a '/', then the callers need to be fixed up accordingly.
  *
  */
+
+static const char *skip_slashes(const char *p)
+{
+	while (is_dir_sep(*p))
+		p++;
+	return p;
+}
+
 int normalize_path_copy_len(char *dst, const char *src, int *prefix_len)
 {
 	char *dst0;
@@ -1028,8 +1135,7 @@ int normalize_path_copy_len(char *dst, const char *src, int *prefix_len)
 	}
 	dst0 = dst;
 
-	while (is_dir_sep(*src))
-		src++;
+	src = skip_slashes(src);
 
 	for (;;) {
 		char c = *src;
@@ -1049,8 +1155,7 @@ int normalize_path_copy_len(char *dst, const char *src, int *prefix_len)
 			} else if (is_dir_sep(src[1])) {
 				/* (2) */
 				src += 2;
-				while (is_dir_sep(*src))
-					src++;
+				src = skip_slashes(src);
 				continue;
 			} else if (src[1] == '.') {
 				if (!src[2]) {
@@ -1060,8 +1165,7 @@ int normalize_path_copy_len(char *dst, const char *src, int *prefix_len)
 				} else if (is_dir_sep(src[2])) {
 					/* (4) */
 					src += 3;
-					while (is_dir_sep(*src))
-						src++;
+					src = skip_slashes(src);
 					goto up_one;
 				}
 			}
@@ -1081,6 +1185,8 @@ int normalize_path_copy_len(char *dst, const char *src, int *prefix_len)
 
 	up_one:
 		/*
+		 * strip the last component
+		 *
 		 * dst0..dst is prefix portion, and dst[-1] is '/';
 		 * go up one level.
 		 */
@@ -1138,12 +1244,12 @@ int strbuf_normalize_path(struct strbuf *src)
  */
 int longest_ancestor_length(const char *path, struct string_list *prefixes)
 {
-	int i, max_len = -1;
+	int max_len = -1;
 
 	if (!strcmp(path, "/"))
 		return -1;
 
-	for (i = 0; i < prefixes->nr; i++) {
+	for (size_t i = 0; i < prefixes->nr; i++) {
 		const char *ceil = prefixes->items[i].string;
 		int len = strlen(ceil);
 

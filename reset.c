@@ -80,7 +80,7 @@ static int update_refs(const struct reset_head_opts *opts,
 	}
 	if (!ret && run_hook)
 		run_hooks_l(the_repository, "post-checkout",
-			    oid_to_hex(head ? head : null_oid()),
+			    oid_to_hex(head ? head : null_oid(the_hash_algo)),
 			    oid_to_hex(oid), "1", NULL);
 	strbuf_release(&msg);
 	return ret;
@@ -163,7 +163,7 @@ int reset_head(struct repository *r, const struct reset_head_opts *opts)
 		goto leave_reset_head;
 	}
 
-	tree = parse_tree_indirect(oid);
+	tree = repo_parse_tree_indirect(the_repository, oid);
 	if (!tree) {
 		ret = error(_("unable to read tree (%s)"), oid_to_hex(oid));
 		goto leave_reset_head;

@@ -5,7 +5,7 @@
 #include "repository.h"
 #include "tempfile.h"
 #include "lockfile.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "commit.h"
 #include "tag.h"
 #include "pkt-line.h"
@@ -40,7 +40,7 @@ int register_shallow(struct repository *r, const struct object_id *oid)
 	oidcpy(&graft->oid, oid);
 	graft->nr_parent = -1;
 	if (commit && commit->object.parsed) {
-		free_commit_list(commit->parents);
+		commit_list_free(commit->parents);
 		commit->parents = NULL;
 	}
 	return register_commit_graft(r, graft, 0);
@@ -51,6 +51,7 @@ int unregister_shallow(const struct object_id *oid)
 	int pos = commit_graft_pos(the_repository, oid);
 	if (pos < 0)
 		return -1;
+	free(the_repository->parsed_objects->grafts[pos]);
 	if (pos + 1 < the_repository->parsed_objects->grafts_nr)
 		MOVE_ARRAY(the_repository->parsed_objects->grafts + pos,
 			   the_repository->parsed_objects->grafts + pos + 1,
@@ -97,7 +98,7 @@ static void reset_repository_shallow(struct repository *r)
 {
 	r->parsed_objects->is_shallow = -1;
 	stat_validity_clear(r->parsed_objects->shallow_stat);
-	reset_commit_grafts(r);
+	parsed_object_pool_reset_commit_grafts(r->parsed_objects);
 }
 
 int commit_shallow_file(struct repository *r, struct shallow_lock *lk)
@@ -129,10 +130,24 @@ static void free_depth_in_slab(int **ptr)
 {
 	FREE_AND_NULL(*ptr);
 }
-struct commit_list *get_shallow_commits(struct object_array *heads, int depth,
-		int shallow_flag, int not_shallow_flag)
+/*
+ * This is a common internal function that can either return a list of
+ * shallow commits or calculate the current maximum depth of a shallow
+ * repository, depending on the input parameters.
+ *
+ * Depth calculation is triggered by passing the `shallows` parameter.
+ * In this case, the computed depth is stored in `max_cur_depth` (if it is
+ * provided), and the function returns NULL.
+ *
+ * Otherwise, `max_cur_depth` remains unchanged and the function returns
+ * a list of shallow commits.
+ */
+static struct commit_list *get_shallows_or_depth(struct object_array *heads,
+				struct object_array *shallows, int *max_cur_depth,
+				int depth, int shallow_flag, int not_shallow_flag)
 {
-	int i = 0, cur_depth = 0;
+	size_t i = 0;
+	int cur_depth = 0, cur_depth_shallow = 0;
 	struct commit_list *result = NULL;
 	struct object_array stack = OBJECT_ARRAY_INIT;
 	struct commit *commit = NULL;
@@ -166,16 +181,30 @@ struct commit_list *get_shallow_commits(struct object_array *heads, int depth,
 		}
 		parse_commit_or_die(commit);
 		cur_depth++;
-		if ((depth != INFINITE_DEPTH && cur_depth >= depth) ||
-		    (is_repository_shallow(the_repository) && !commit->parents &&
-		     (graft = lookup_commit_graft(the_repository, &commit->object.oid)) != NULL &&
-		     graft->nr_parent < 0)) {
-			commit_list_insert(commit, &result);
-			commit->object.flags |= shallow_flag;
-			commit = NULL;
-			continue;
+		if (shallows) {
+			for (size_t j = 0; j < shallows->nr; j++)
+				if (oideq(&commit->object.oid, &shallows->objects[j].item->oid))
+					if (!cur_depth_shallow || cur_depth < cur_depth_shallow)
+						cur_depth_shallow = cur_depth;
+
+			if ((is_repository_shallow(the_repository) && !commit->parents &&
+			     (graft = lookup_commit_graft(the_repository, &commit->object.oid)) != NULL &&
+			     graft->nr_parent < 0)) {
+				commit = NULL;
+				continue;
+			}
+		} else {
+			if ((depth != INFINITE_DEPTH && cur_depth >= depth) ||
+			    (is_repository_shallow(the_repository) && !commit->parents &&
+			     (graft = lookup_commit_graft(the_repository, &commit->object.oid)) != NULL &&
+			     graft->nr_parent < 0)) {
+				commit_list_insert(commit, &result);
+				commit->object.flags |= shallow_flag;
+				commit = NULL;
+				continue;
+			}
+			commit->object.flags |= not_shallow_flag;
 		}
-		commit->object.flags |= not_shallow_flag;
 		for (p = commit->parents, commit = NULL; p; p = p->next) {
 			int **depth_slot = commit_depth_at(&depths, p->item);
 			if (!*depth_slot) {
@@ -196,8 +225,30 @@ struct commit_list *get_shallow_commits(struct object_array *heads, int depth,
 		}
 	}
 	deep_clear_commit_depth(&depths, free_depth_in_slab);
+	object_array_clear(&stack);
 
+	if (shallows && max_cur_depth)
+		*max_cur_depth = cur_depth_shallow;
 	return result;
+}
+
+int get_shallows_depth(struct object_array *heads, struct object_array *shallows)
+{
+	int max_cur_depth = 0;
+	get_shallows_or_depth(heads, shallows, &max_cur_depth, 0, 0, 0);
+	return max_cur_depth;
+
+}
+
+struct commit_list *get_shallow_commits(struct object_array *heads,
+					struct object_array *shallows, int deepen_relative,
+					int depth, int shallow_flag, int not_shallow_flag)
+{
+	if (shallows && deepen_relative) {
+		depth += get_shallows_depth(heads, shallows);
+	}
+	return get_shallows_or_depth(heads, NULL, NULL,
+				     depth, shallow_flag, not_shallow_flag);
 }
 
 static void show_commit(struct commit *commit, void *data)
@@ -211,7 +262,7 @@ static void show_commit(struct commit *commit, void *data)
  * are marked with shallow_flag. The list of border/shallow commits
  * are also returned.
  */
-struct commit_list *get_shallow_commits_by_rev_list(int ac, const char **av,
+struct commit_list *get_shallow_commits_by_rev_list(struct strvec *argv,
 						    int shallow_flag,
 						    int not_shallow_flag)
 {
@@ -224,13 +275,13 @@ struct commit_list *get_shallow_commits_by_rev_list(int ac, const char **av,
 	 * SHALLOW (excluded) and NOT_SHALLOW (included) should not be
 	 * set at this point. But better be safe than sorry.
 	 */
-	clear_object_flags(both_flags);
+	clear_object_flags(the_repository, both_flags);
 
 	is_repository_shallow(the_repository); /* make sure shallows are read */
 
 	repo_init_revisions(the_repository, &revs, NULL);
 	save_commit_buffer = 0;
-	setup_revisions(ac, av, &revs, NULL);
+	setup_revisions_from_strvec(argv, &revs, NULL);
 
 	if (prepare_revision_walk(&revs))
 		die("revision walk setup failed");
@@ -265,7 +316,7 @@ struct commit_list *get_shallow_commits_by_rev_list(int ac, const char **av,
 				break;
 			}
 	}
-	free_commit_list(not_shallow_list);
+	commit_list_free(not_shallow_list);
 
 	/*
 	 * Now we can clean up NOT_SHALLOW on border commits. Having
@@ -308,7 +359,8 @@ static int write_one_shallow(const struct commit_graft *graft, void *cb_data)
 	if (graft->nr_parent != -1)
 		return 0;
 	if (data->flags & QUICK) {
-		if (!repo_has_object_file(the_repository, &graft->oid))
+		if (!odb_has_object(the_repository->objects, &graft->oid,
+				    ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR))
 			return 0;
 	} else if (data->flags & SEEN_ONLY) {
 		struct commit *c = lookup_commit(the_repository, &graft->oid);
@@ -333,16 +385,16 @@ static int write_shallow_commits_1(struct strbuf *out, int use_pack_protocol,
 				   const struct oid_array *extra,
 				   unsigned flags)
 {
-	struct write_shallow_data data;
-	int i;
-	data.out = out;
-	data.use_pack_protocol = use_pack_protocol;
-	data.count = 0;
-	data.flags = flags;
+	struct write_shallow_data data = {
+		.out = out,
+		.use_pack_protocol = use_pack_protocol,
+		.flags = flags,
+	};
+
 	for_each_commit_graft(write_one_shallow, &data);
 	if (!extra)
 		return data.count;
-	for (i = 0; i < extra->nr; i++) {
+	for (size_t i = 0; i < extra->nr; i++) {
 		strbuf_addstr(out, oid_to_hex(extra->oid + i));
 		strbuf_addch(out, '\n');
 		data.count++;
@@ -362,7 +414,9 @@ const char *setup_temporary_shallow(const struct oid_array *extra)
 	struct strbuf sb = STRBUF_INIT;
 
 	if (write_shallow_commits(&sb, 0, extra)) {
-		temp = xmks_tempfile(git_path("shallow_XXXXXX"));
+		char *path = repo_git_path(the_repository, "shallow_XXXXXX");
+		temp = xmks_tempfile(path);
+		free(path);
 
 		if (write_in_full(temp->fd, sb.buf, sb.len) < 0 ||
 		    close_tempfile_gently(temp) < 0)
@@ -464,16 +518,17 @@ struct trace_key trace_shallow = TRACE_KEY_INIT(SHALLOW);
  */
 void prepare_shallow_info(struct shallow_info *info, struct oid_array *sa)
 {
-	int i;
 	trace_printf_key(&trace_shallow, "shallow: prepare_shallow_info\n");
 	memset(info, 0, sizeof(*info));
+	commit_stack_init(&info->commits);
 	info->shallow = sa;
 	if (!sa)
 		return;
 	ALLOC_ARRAY(info->ours, sa->nr);
 	ALLOC_ARRAY(info->theirs, sa->nr);
-	for (i = 0; i < sa->nr; i++) {
-		if (repo_has_object_file(the_repository, sa->oid + i)) {
+	for (size_t i = 0; i < sa->nr; i++) {
+		if (odb_has_object(the_repository->objects, sa->oid + i,
+				   ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR)) {
 			struct commit_graft *graft;
 			graft = lookup_commit_graft(the_repository,
 						    &sa->oid[i]);
@@ -487,8 +542,18 @@ void prepare_shallow_info(struct shallow_info *info, struct oid_array *sa)
 
 void clear_shallow_info(struct shallow_info *info)
 {
+	if (info->used_shallow) {
+		for (size_t i = 0; i < info->shallow->nr; i++)
+			free(info->used_shallow[i]);
+		free(info->used_shallow);
+	}
+
+	free(info->need_reachability_test);
+	free(info->reachable);
+	free(info->shallow_ref);
 	free(info->ours);
 	free(info->theirs);
+	commit_stack_clear(&info->commits);
 }
 
 /* Step 4, remove non-existent ones in "theirs" after getting the pack */
@@ -496,12 +561,13 @@ void clear_shallow_info(struct shallow_info *info)
 void remove_nonexistent_theirs_shallow(struct shallow_info *info)
 {
 	struct object_id *oid = info->shallow->oid;
-	int i, dst;
+	size_t i, dst;
 	trace_printf_key(&trace_shallow, "shallow: remove_nonexistent_theirs_shallow\n");
 	for (i = dst = 0; i < info->nr_theirs; i++) {
 		if (i != dst)
 			info->theirs[dst] = info->theirs[i];
-		if (repo_has_object_file(the_repository, oid + info->theirs[i]))
+		if (odb_has_object(the_repository->objects, oid + info->theirs[i],
+				   ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR))
 			dst++;
 	}
 	info->nr_theirs = dst;
@@ -524,7 +590,7 @@ static uint32_t *paint_alloc(struct paint_info *info)
 	unsigned nr = DIV_ROUND_UP(info->nr_bits, 32);
 	unsigned size = nr * sizeof(uint32_t);
 	void *p;
-	if (!info->pool_count || size > info->end - info->free) {
+	if (!info->pool_count || info->end < info->free + size) {
 		if (size > POOL_SIZE)
 			BUG("pool size too small for %d in paint_alloc()",
 			    size);
@@ -549,7 +615,7 @@ static void paint_down(struct paint_info *info, const struct object_id *oid,
 {
 	unsigned int i, nr;
 	struct commit_list *head = NULL;
-	int bitmap_nr = DIV_ROUND_UP(info->nr_bits, 32);
+	size_t bitmap_nr = DIV_ROUND_UP(info->nr_bits, 32);
 	size_t bitmap_size = st_mult(sizeof(uint32_t), bitmap_nr);
 	struct commit *c = lookup_commit_reference_gently(the_repository, oid,
 							  1);
@@ -601,9 +667,9 @@ static void paint_down(struct paint_info *info, const struct object_id *oid,
 		}
 	}
 
-	nr = get_max_object_index();
+	nr = get_max_object_index(the_repository);
 	for (i = 0; i < nr; i++) {
-		struct object *o = get_indexed_object(i);
+		struct object *o = get_indexed_object(the_repository, i);
 		if (o && o->type == OBJ_COMMIT)
 			o->flags &= ~SEEN;
 	}
@@ -611,14 +677,10 @@ static void paint_down(struct paint_info *info, const struct object_id *oid,
 	free(tmp);
 }
 
-static int mark_uninteresting(const char *refname UNUSED,
-			      const char *referent UNUSED,
-			      const struct object_id *oid,
-			      int flags UNUSED,
-			      void *cb_data UNUSED)
+static int mark_uninteresting(const struct reference *ref, void *cb_data UNUSED)
 {
 	struct commit *commit = lookup_commit_reference_gently(the_repository,
-							       oid, 1);
+							       ref->oid, 1);
 	if (!commit)
 		return 0;
 	commit->object.flags |= UNINTERESTING;
@@ -649,7 +711,7 @@ void assign_shallow_commits_to_refs(struct shallow_info *info,
 	struct object_id *oid = info->shallow->oid;
 	struct oid_array *ref = info->ref;
 	unsigned int i, nr;
-	int *shallow, nr_shallow = 0;
+	size_t *shallow, nr_shallow = 0;
 	struct paint_info pi;
 
 	trace_printf_key(&trace_shallow, "shallow: assign_shallow_commits_to_refs\n");
@@ -663,9 +725,9 @@ void assign_shallow_commits_to_refs(struct shallow_info *info,
 	 * Prepare the commit graph to track what refs can reach what
 	 * (new) shallow commits.
 	 */
-	nr = get_max_object_index();
+	nr = get_max_object_index(the_repository);
 	for (i = 0; i < nr; i++) {
-		struct object *o = get_indexed_object(i);
+		struct object *o = get_indexed_object(the_repository, i);
 		if (!o || o->type != OBJ_COMMIT)
 			continue;
 
@@ -698,7 +760,7 @@ void assign_shallow_commits_to_refs(struct shallow_info *info,
 
 	if (used) {
 		int bitmap_size = DIV_ROUND_UP(pi.nr_bits, 32) * sizeof(uint32_t);
-		memset(used, 0, sizeof(*used) * info->shallow->nr);
+		MEMZERO_ARRAY(used, info->shallow->nr);
 		for (i = 0; i < nr_shallow; i++) {
 			const struct commit *c = lookup_commit(the_repository,
 							       &oid[shallow[i]]);
@@ -722,32 +784,21 @@ void assign_shallow_commits_to_refs(struct shallow_info *info,
 	free(shallow);
 }
 
-struct commit_array {
-	struct commit **commits;
-	int nr, alloc;
-};
-
-static int add_ref(const char *refname UNUSED,
-		  const char *referent UNUSED,
-		   const struct object_id *oid,
-		   int flags UNUSED,
-		   void *cb_data)
+static int add_ref(const struct reference *ref, void *cb_data)
 {
-	struct commit_array *ca = cb_data;
-	ALLOC_GROW(ca->commits, ca->nr + 1, ca->alloc);
-	ca->commits[ca->nr] = lookup_commit_reference_gently(the_repository,
-							     oid, 1);
-	if (ca->commits[ca->nr])
-		ca->nr++;
+	struct commit_stack *cs = cb_data;
+	struct commit *commit = lookup_commit_reference_gently(the_repository,
+							       ref->oid, 1);
+	if (commit)
+		commit_stack_push(cs, commit);
 	return 0;
 }
 
-static void update_refstatus(int *ref_status, int nr, uint32_t *bitmap)
+static void update_refstatus(int *ref_status, size_t nr, uint32_t *bitmap)
 {
-	unsigned int i;
 	if (!ref_status)
 		return;
-	for (i = 0; i < nr; i++)
+	for (size_t i = 0; i < nr; i++)
 		if (bitmap[i / 32] & (1U << (i % 32)))
 			ref_status[i]++;
 }
@@ -762,13 +813,13 @@ static void post_assign_shallow(struct shallow_info *info,
 	struct object_id *oid = info->shallow->oid;
 	struct commit *c;
 	uint32_t **bitmap;
-	int dst, i, j;
-	int bitmap_nr = DIV_ROUND_UP(info->ref->nr, 32);
-	struct commit_array ca;
+	size_t dst, i, j;
+	size_t bitmap_nr = DIV_ROUND_UP(info->ref->nr, 32);
+	struct commit_stack cs = COMMIT_STACK_INIT;
 
 	trace_printf_key(&trace_shallow, "shallow: post_assign_shallow\n");
 	if (ref_status)
-		memset(ref_status, 0, sizeof(*ref_status) * info->ref->nr);
+		MEMZERO_ARRAY(ref_status, info->ref->nr);
 
 	/* Remove unreachable shallow commits from "theirs" */
 	for (i = dst = 0; i < info->nr_theirs; i++) {
@@ -787,9 +838,8 @@ static void post_assign_shallow(struct shallow_info *info,
 	}
 	info->nr_theirs = dst;
 
-	memset(&ca, 0, sizeof(ca));
-	refs_head_ref(get_main_ref_store(the_repository), add_ref, &ca);
-	refs_for_each_ref(get_main_ref_store(the_repository), add_ref, &ca);
+	refs_head_ref(get_main_ref_store(the_repository), add_ref, &cs);
+	refs_for_each_ref(get_main_ref_store(the_repository), add_ref, &cs);
 
 	/* Remove unreachable shallow commits from "ours" */
 	for (i = dst = 0; i < info->nr_ours; i++) {
@@ -802,7 +852,7 @@ static void post_assign_shallow(struct shallow_info *info,
 		for (j = 0; j < bitmap_nr; j++)
 			if (bitmap[0][j]) {
 				/* Step 7, reachability test at commit level */
-				int ret = repo_in_merge_bases_many(the_repository, c, ca.nr, ca.commits, 1);
+				int ret = repo_in_merge_bases_many(the_repository, c, cs.nr, cs.items, 1);
 				if (ret < 0)
 					exit(128);
 				if (!ret) {
@@ -814,7 +864,7 @@ static void post_assign_shallow(struct shallow_info *info,
 	}
 	info->nr_ours = dst;
 
-	free(ca.commits);
+	commit_stack_clear(&cs);
 }
 
 /* (Delayed) step 7, reachability test at commit level */
@@ -824,22 +874,17 @@ int delayed_reachability_test(struct shallow_info *si, int c)
 		struct commit *commit = lookup_commit(the_repository,
 						      &si->shallow->oid[c]);
 
-		if (!si->commits) {
-			struct commit_array ca;
-
-			memset(&ca, 0, sizeof(ca));
+		if (!si->commits.nr) {
 			refs_head_ref(get_main_ref_store(the_repository),
-				      add_ref, &ca);
+				      add_ref, &si->commits);
 			refs_for_each_ref(get_main_ref_store(the_repository),
-					  add_ref, &ca);
-			si->commits = ca.commits;
-			si->nr_commits = ca.nr;
+					  add_ref, &si->commits);
 		}
 
 		si->reachable[c] = repo_in_merge_bases_many(the_repository,
 							    commit,
-							    si->nr_commits,
-							    si->commits,
+							    si->commits.nr,
+							    si->commits.items,
 							    1);
 		if (si->reachable[c] < 0)
 			exit(128);

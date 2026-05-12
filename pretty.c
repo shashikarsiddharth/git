@@ -1,4 +1,5 @@
 #define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
 #include "config.h"
@@ -140,7 +141,7 @@ static void setup_commit_formats(void)
 	COPY_ARRAY(commit_formats, builtin_formats,
 		   ARRAY_SIZE(builtin_formats));
 
-	git_config(git_pretty_formats_config, NULL);
+	repo_config(the_repository, git_pretty_formats_config, NULL);
 }
 
 static struct cmt_fmt_map *find_commit_format_recursive(const char *sought,
@@ -469,7 +470,7 @@ static inline void strbuf_add_with_color(struct strbuf *sb, const char *color,
 
 static void append_line_with_color(struct strbuf *sb, struct grep_opt *opt,
 				   const char *line, size_t linelen,
-				   int color, enum grep_context ctx,
+				   enum git_colorbool color, enum grep_context ctx,
 				   enum grep_header_field field)
 {
 	const char *buf, *eol, *line_color, *match_color;
@@ -780,7 +781,7 @@ static int mailmap_name(const char **email, size_t *email_len,
 	static struct string_list *mail_map;
 	if (!mail_map) {
 		CALLOC_ARRAY(mail_map, 1);
-		read_mailmap(mail_map);
+		read_mailmap(the_repository, mail_map);
 	}
 	return mail_map->nr && map_user(mail_map, email, email_len, name, name_len);
 }
@@ -898,7 +899,7 @@ struct format_commit_context {
 	const char *message;
 	char *commit_encoding;
 	size_t width, indent1, indent2;
-	int auto_color;
+	enum git_colorbool auto_color;
 	int padding;
 
 	/* These offsets are relative to the start of the commit message. */
@@ -1454,14 +1455,14 @@ static size_t format_commit_one(struct strbuf *sb, /* in UTF-8 */
 	switch (placeholder[0]) {
 	case 'C':
 		if (starts_with(placeholder + 1, "(auto)")) {
-			c->auto_color = want_color(c->pretty_ctx->color);
-			if (c->auto_color && sb->len)
+			c->auto_color = c->pretty_ctx->color;
+			if (want_color(c->auto_color) && sb->len)
 				strbuf_addstr(sb, GIT_COLOR_RESET);
 			return 7; /* consumed 7 bytes, "C(auto)" */
 		} else {
 			int ret = parse_color(sb, placeholder, c);
 			if (ret)
-				c->auto_color = 0;
+				c->auto_color = GIT_COLOR_NEVER;
 			/*
 			 * Otherwise, we decided to treat %C<unknown>
 			 * as a literal string, and the previous
@@ -1547,6 +1548,21 @@ static size_t format_commit_one(struct strbuf *sb, /* in UTF-8 */
 	/* these depend on the commit */
 	if (!commit->object.parsed)
 		parse_object(the_repository, &commit->object.oid);
+
+	if (starts_with(placeholder, "(count)")) {
+		if (!c->pretty_ctx->rev)
+			die(_("%s is not supported by this command"), "%(count)");
+		strbuf_addf(sb, "%0*d", decimal_width(c->pretty_ctx->rev->total),
+			    c->pretty_ctx->rev->nr);
+		return 7;
+	}
+
+	if (starts_with(placeholder, "(total)")) {
+		if (!c->pretty_ctx->rev)
+			die(_("%s is not supported by this command"), "%(total)");
+		strbuf_addf(sb, "%d", c->pretty_ctx->rev->total);
+		return 7;
+	}
 
 	switch (placeholder[0]) {
 	case 'H':		/* commit hash */
@@ -2032,6 +2048,7 @@ void repo_format_commit_message(struct repository *r,
 
 	free(context.commit_encoding);
 	repo_unuse_commit_buffer(r, commit, context.message);
+	signature_check_clear(&context.signature_check);
 }
 
 static void pp_header(struct pretty_print_context *pp,
@@ -2165,7 +2182,7 @@ static int pp_utf8_width(const char *start, const char *end)
 }
 
 static void strbuf_add_tabexpand(struct strbuf *sb, struct grep_opt *opt,
-				 int color, int tabwidth, const char *line,
+				 enum git_colorbool color, int tabwidth, const char *line,
 				 int linelen)
 {
 	const char *tab;
@@ -2205,7 +2222,7 @@ static void strbuf_add_tabexpand(struct strbuf *sb, struct grep_opt *opt,
 }
 
 /*
- * pp_handle_indent() prints out the intendation, and
+ * pp_handle_indent() prints out the indentation, and
  * the whole line (without the final newline), after
  * de-tabifying.
  */

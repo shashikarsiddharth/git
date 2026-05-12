@@ -2,7 +2,6 @@
 
 test_description='git am handling submodules'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-submodule-update.sh
 
@@ -20,7 +19,6 @@ am_3way () {
 	$2 git am --3way patch
 }
 
-KNOWN_FAILURE_NOFF_MERGE_ATTEMPTS_TO_MERGE_REMOVED_SUBMODULE_FILES=1
 test_submodule_switch_func "am_3way"
 
 test_expect_success 'setup diff.submodule' '

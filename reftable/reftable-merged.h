@@ -1,14 +1,15 @@
 /*
-Copyright 2020 Google LLC
-
-Use of this source code is governed by a BSD-style
-license that can be found in the LICENSE file or at
-https://developers.google.com/open-source/licenses/bsd
-*/
+ * Copyright 2020 Google LLC
+ *
+ * Use of this source code is governed by a BSD-style
+ * license that can be found in the LICENSE file or at
+ * https://developers.google.com/open-source/licenses/bsd
+ */
 
 #ifndef REFTABLE_MERGED_H
 #define REFTABLE_MERGED_H
 
+#include "reftable-system.h"
 #include "reftable-iterator.h"
 
 /*
@@ -26,23 +27,23 @@ https://developers.google.com/open-source/licenses/bsd
 /* A merged table is implements seeking/iterating over a stack of tables. */
 struct reftable_merged_table;
 
-struct reftable_reader;
+struct reftable_table;
 
 /*
- * reftable_merged_table_new creates a new merged table. The readers must be
+ * reftable_merged_table_new creates a new merged table. The tables must be
  * kept alive as long as the merged table is still in use.
  */
 int reftable_merged_table_new(struct reftable_merged_table **dest,
-			      struct reftable_reader **readers, size_t n,
-			      uint32_t hash_id);
+			      struct reftable_table **tables, size_t n,
+			      enum reftable_hash hash_id);
 
 /* Initialize a merged table iterator for reading refs. */
-void reftable_merged_table_init_ref_iterator(struct reftable_merged_table *mt,
-					     struct reftable_iterator *it);
+int reftable_merged_table_init_ref_iterator(struct reftable_merged_table *mt,
+					    struct reftable_iterator *it);
 
 /* Initialize a merged table iterator for reading logs. */
-void reftable_merged_table_init_log_iterator(struct reftable_merged_table *mt,
-					     struct reftable_iterator *it);
+int reftable_merged_table_init_log_iterator(struct reftable_merged_table *mt,
+					    struct reftable_iterator *it);
 
 /* returns the max update_index covered by this merged table. */
 uint64_t
@@ -56,6 +57,6 @@ reftable_merged_table_min_update_index(struct reftable_merged_table *mt);
 void reftable_merged_table_free(struct reftable_merged_table *m);
 
 /* return the hash ID of the merged table. */
-uint32_t reftable_merged_table_hash_id(struct reftable_merged_table *m);
+enum reftable_hash reftable_merged_table_hash_id(struct reftable_merged_table *m);
 
 #endif

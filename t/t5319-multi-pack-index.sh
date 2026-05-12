@@ -2,7 +2,6 @@
 
 test_description='multi-pack-indexes'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-chunk.sh
 . "$TEST_DIRECTORY"/lib-midx.sh
@@ -29,11 +28,11 @@ midx_read_expect () {
 		EOF
 		if test $NUM_PACKS -ge 1
 		then
-			ls $OBJECT_DIR/pack/ | grep idx | sort
+			ls "$OBJECT_DIR"/pack/ | grep idx | sort
 		fi &&
 		printf "object-dir: $OBJECT_DIR\n"
 	} >expect &&
-	test-tool read-midx $OBJECT_DIR >actual &&
+	test-tool read-midx "$OBJECT_DIR" >actual &&
 	test_cmp expect actual
 }
 
@@ -306,7 +305,7 @@ test_expect_success 'midx picks objects from preferred pack' '
 
 		ofs=$(git show-index <objects/pack/test-BC-$bc.idx | grep $b |
 			cut -d" " -f1) &&
-		printf "%s %s\tobjects/pack/test-BC-%s.pack\n" \
+		printf "%s %s\t./objects/pack/test-BC-%s.pack\n" \
 			"$b" "$ofs" "$bc" >expect &&
 		grep ^$b out >actual &&
 
@@ -351,7 +350,69 @@ test_expect_success 'preferred pack from existing MIDX without bitmaps' '
 		# the new MIDX
 		git multi-pack-index write --preferred-pack=pack-$pack.pack
 	)
+'
 
+test_expect_success 'preferred pack cannot be determined without bitmap' '
+	test_when_finished "rm -fr preferred-can-be-queried" &&
+	git init preferred-can-be-queried &&
+	(
+		cd preferred-can-be-queried &&
+		test_commit initial &&
+		git repack -Adl --write-midx --no-write-bitmap-index &&
+		test_must_fail test-tool read-midx --preferred-pack .git/objects 2>err &&
+		test_grep "could not determine MIDX preferred pack" err &&
+		git repack -Adl --write-midx --write-bitmap-index &&
+		test-tool read-midx --preferred-pack .git/objects
+	)
+'
+
+test_midx_is_retained () {
+	test-tool chmtime =0 .git/objects/pack/multi-pack-index &&
+	ls -l .git/objects/pack/multi-pack-index >expect &&
+	git multi-pack-index write "$@" &&
+	ls -l .git/objects/pack/multi-pack-index >actual &&
+	test_cmp expect actual
+}
+
+test_midx_is_rewritten () {
+	test-tool chmtime =0 .git/objects/pack/multi-pack-index &&
+	ls -l .git/objects/pack/multi-pack-index >expect &&
+	git multi-pack-index write "$@" &&
+	ls -l .git/objects/pack/multi-pack-index >actual &&
+	! test_cmp expect actual
+}
+
+test_expect_success 'up-to-date multi-pack-index is retained' '
+	test_when_finished "rm -fr midx-up-to-date" &&
+	git init midx-up-to-date &&
+	(
+		cd midx-up-to-date &&
+
+		# Write the initial pack that contains the most objects.
+		test_commit first &&
+		test_commit second &&
+		git repack -Ad --write-midx &&
+		test_midx_is_retained &&
+
+		# Writing a new bitmap index should cause us to regenerate the MIDX.
+		test_midx_is_rewritten --bitmap &&
+		test_midx_is_retained --bitmap &&
+
+		# Ensure that writing a new packfile causes us to rewrite the index.
+		test_commit incremental &&
+		git repack -d &&
+		test_midx_is_rewritten &&
+		test_midx_is_retained &&
+
+		for pack in .git/objects/pack/*.idx
+		do
+			basename "$pack" || exit 1
+		done >stdin &&
+		test_line_count = 2 stdin &&
+		test_midx_is_retained --stdin-packs <stdin &&
+		head -n1 stdin >stdin.trimmed &&
+		test_midx_is_rewritten --stdin-packs <stdin.trimmed
+	)
 '
 
 test_expect_success 'verify multi-pack-index success' '
@@ -451,12 +512,7 @@ test_expect_success 'verify invalid chunk offset' '
 		"improper chunk offset(s)"
 '
 
-test_expect_success 'verify packnames out of order' '
-	corrupt_midx_and_verify $MIDX_BYTE_PACKNAME_ORDER "z" $objdir \
-		"pack names out of order"
-'
-
-test_expect_success 'verify packnames out of order' '
+test_expect_success 'verify missing pack' '
 	corrupt_midx_and_verify $MIDX_BYTE_PACKNAME_ORDER "a" $objdir \
 		"failed to load pack"
 '
@@ -515,6 +571,15 @@ test_expect_success 'verify incorrect checksum' '
 	corrupt_midx_and_verify $pos \
 		"\377\377\377\377\377\377\377\377\377\377" \
 		$objdir "incorrect checksum"
+'
+
+test_expect_success 'setup for v1-specific fsck tests' '
+	git -c midx.version=1 multi-pack-index write
+'
+
+test_expect_success 'verify packnames out of order (v1)' '
+	corrupt_midx_and_verify $MIDX_BYTE_PACKNAME_ORDER "z" $objdir \
+		"pack names out of order"
 '
 
 test_expect_success 'repack progress off for redirected stderr' '
@@ -640,7 +705,7 @@ test_expect_success 'force some 64-bit offsets with pack-objects' '
 		( cd ../objects64 && pwd ) >.git/objects/info/alternates &&
 		midx64=$(git multi-pack-index --object-dir=../objects64 write)
 	) &&
-	midx_read_expect 1 63 5 objects64 " large-offsets"
+	midx_read_expect 1 63 5 "$(pwd)/objects64" " large-offsets"
 '
 
 test_expect_success 'verify multi-pack-index with 64-bit offsets' '
@@ -990,6 +1055,23 @@ test_expect_success 'repack --batch-size=0 repacks everything' '
 	)
 '
 
+test_expect_success EXPENSIVE 'repack/expire with many packs' '
+	cp -r dup many &&
+	(
+		cd many &&
+
+		for i in $(test_seq 1 100)
+		do
+			test_commit extra$i &&
+			git maintenance run --task=loose-objects || return 1
+		done &&
+
+		git multi-pack-index write &&
+		git multi-pack-index repack &&
+		git multi-pack-index expire
+	)
+'
+
 test_expect_success 'repack --batch-size=<large> repacks everything' '
 	(
 		cd dup2 &&
@@ -1084,7 +1166,10 @@ test_expect_success 'load reverse index when missing .idx, .pack' '
 		mv $idx.bak $idx &&
 
 		mv $pack $pack.bak &&
-		git cat-file --batch-check="%(objectsize:disk)" <tip
+		git cat-file --batch-check="%(objectsize:disk)" <tip &&
+
+		test_must_fail git multi-pack-index write 2>err &&
+		test_grep "could not load pack" err
 	)
 '
 
@@ -1121,7 +1206,7 @@ corrupt_chunk () {
 	corrupt_chunk_file $midx "$@"
 }
 
-test_expect_success 'reader notices too-small oid fanout chunk' '
+test_expect_success PERL_TEST_HELPERS 'reader notices too-small oid fanout chunk' '
 	corrupt_chunk OIDF clear 00000000 &&
 	test_must_fail git log 2>err &&
 	cat >expect <<-\EOF &&
@@ -1131,7 +1216,7 @@ test_expect_success 'reader notices too-small oid fanout chunk' '
 	test_cmp expect err
 '
 
-test_expect_success 'reader notices too-small oid lookup chunk' '
+test_expect_success PERL_TEST_HELPERS 'reader notices too-small oid lookup chunk' '
 	corrupt_chunk OIDL clear 00000000 &&
 	test_must_fail git log 2>err &&
 	cat >expect <<-\EOF &&
@@ -1141,7 +1226,7 @@ test_expect_success 'reader notices too-small oid lookup chunk' '
 	test_cmp expect err
 '
 
-test_expect_success 'reader notices too-small pack names chunk' '
+test_expect_success PERL_TEST_HELPERS 'reader notices too-small pack names chunk' '
 	# There is no NUL to terminate the name here, so the
 	# chunk is too short.
 	corrupt_chunk PNAM clear 70656666 &&
@@ -1152,7 +1237,7 @@ test_expect_success 'reader notices too-small pack names chunk' '
 	test_cmp expect err
 '
 
-test_expect_success 'reader handles unaligned chunks' '
+test_expect_success PERL_TEST_HELPERS 'reader handles unaligned chunks' '
 	# A 9-byte PNAM means all of the subsequent chunks
 	# will no longer be 4-byte aligned, but it is still
 	# a valid one-pack chunk on its own (it is "foo.pack\0").
@@ -1166,7 +1251,7 @@ test_expect_success 'reader handles unaligned chunks' '
 	test_cmp expect.err err
 '
 
-test_expect_success 'reader notices too-small object offset chunk' '
+test_expect_success PERL_TEST_HELPERS 'reader notices too-small object offset chunk' '
 	corrupt_chunk OOFF clear 00000000 &&
 	test_must_fail git log 2>err &&
 	cat >expect <<-\EOF &&
@@ -1176,7 +1261,7 @@ test_expect_success 'reader notices too-small object offset chunk' '
 	test_cmp expect err
 '
 
-test_expect_success 'reader bounds-checks large offset table' '
+test_expect_success PERL_TEST_HELPERS 'reader bounds-checks large offset table' '
 	# re-use the objects64 dir here to cheaply get access to a midx
 	# with large offsets.
 	git init repo &&
@@ -1198,7 +1283,7 @@ test_expect_success 'reader bounds-checks large offset table' '
 	)
 '
 
-test_expect_success 'reader notices too-small revindex chunk' '
+test_expect_success PERL_TEST_HELPERS 'reader notices too-small revindex chunk' '
 	# We only get a revindex with bitmaps (and likewise only
 	# load it when they are asked for).
 	test_config repack.writeBitmaps true &&
@@ -1215,7 +1300,7 @@ test_expect_success 'reader notices too-small revindex chunk' '
 	test_cmp expect.err err
 '
 
-test_expect_success 'reader notices out-of-bounds fanout' '
+test_expect_success PERL_TEST_HELPERS 'reader notices out-of-bounds fanout' '
 	# This is similar to the out-of-bounds fanout test in t5318. The values
 	# in adjacent entries should be large but not identical (they
 	# are used as hi/lo starts for a binary search, which would then abort
@@ -1234,6 +1319,7 @@ test_expect_success 'bitmapped packs are stored via the BTMP chunk' '
 	git init repo &&
 	(
 		cd repo &&
+		git config set maintenance.auto false &&
 
 		for i in 1 2 3 4 5
 		do
@@ -1261,6 +1347,49 @@ test_expect_success 'bitmapped packs are stored via the BTMP chunk' '
 			echo "  bitmap_nr: 3" || return 1
 		done >expect &&
 		test_cmp expect actual
+	)
+'
+
+test_expect_success 'pack.preferBitmapTips interprets patterns as hierarchy' '
+	git init repo &&
+	test_when_finished "rm -fr repo" &&
+	(
+		cd repo &&
+
+		# Create enough commits that not all will receive bitmap
+		# coverage even if they are all at the tip of some reference.
+		test_commit_bulk --message="%s" 103 &&
+		git log --format="create refs/tags/%s %H" HEAD >refs &&
+		git update-ref --stdin <refs &&
+
+		# Create the bitmap via the MIDX.
+		git repack -adb --write-midx &&
+		test-tool bitmap list-commits | sort >commits-with-bitmap &&
+
+		# Verify that we have at least one commit that did not
+		# receive a bitmap.
+		git rev-list HEAD >commits.raw &&
+		sort <commits.raw >commits &&
+		comm -13 commits-with-bitmap commits >commits-wo-bitmap &&
+		test_file_not_empty commits-wo-bitmap &&
+		commit_id=$(head commits-wo-bitmap) &&
+		ref_without_bitmap=$(git for-each-ref --points-at="$commit_id" --format="%(refname)") &&
+
+		# When passing the full refname we do not expect a bitmap to be
+		# generated, as it should be interpreted as if a slash was
+		# appended to the pattern.
+		rm .git/objects/pack/multi-pack-index* &&
+		git -c pack.preferBitmapTips="$ref_without_bitmap" repack -adb --write-midx &&
+		test-tool bitmap list-commits >after &&
+		test_grep ! "$commit_id" after &&
+
+		# But if we pass the parent directory of the ref we should see
+		# a bitmap.
+		ref_namespace=$(dirname "$ref_without_bitmap") &&
+		rm .git/objects/pack/multi-pack-index* &&
+		git -c pack.preferBitmapTips="$ref_namespace" repack -adb --write-midx &&
+		test-tool bitmap list-commits >after &&
+		test_grep "$commit_id" after
 	)
 '
 

@@ -9,7 +9,6 @@ test_description='See why rewinding head breaks send-pack
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 cnt=64
@@ -55,6 +54,13 @@ test_expect_success setup '
 	git update-ref HEAD "$commit" &&
 	echo Rebase &&
 	git log'
+
+test_expect_success 'send-pack does not crash with -h' '
+	test_expect_code 129 git send-pack -h >usage &&
+	test_grep "[Uu]sage: git send-pack " usage &&
+	test_expect_code 129 nongit git send-pack -h >usage &&
+	test_grep "[Uu]sage: git send-pack " usage
+'
 
 test_expect_success 'pack the source repository' '
 	git repack -a -d &&
@@ -181,6 +187,7 @@ test_expect_success 'receive-pack runs auto-gc in remote repo' '
 		cd child &&
 		git config gc.autopacklimit 1 &&
 		git config gc.autodetach false &&
+		git config maintenance.strategy gc &&
 		git branch test_auto_gc &&
 		# And create a file that follows the temporary object naming
 		# convention for the auto-gc to remove
@@ -269,7 +276,7 @@ extract_ref_advertisement () {
 	'
 }
 
-test_expect_success 'receive-pack de-dupes .have lines' '
+test_expect_success PERL_TEST_HELPERS 'receive-pack de-dupes .have lines' '
 	git init shared &&
 	git -C shared commit --allow-empty -m both &&
 	git clone -s shared fork &&

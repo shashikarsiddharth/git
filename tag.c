@@ -1,10 +1,10 @@
-#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
 #include "environment.h"
 #include "tag.h"
 #include "object-name.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "commit.h"
 #include "tree.h"
 #include "blob.h"
@@ -12,6 +12,7 @@
 #include "gpg-interface.h"
 #include "hex.h"
 #include "packfile.h"
+#include "repository.h"
 
 const char *tag_type = "tag";
 
@@ -43,28 +44,28 @@ static int run_gpg_verify(const char *buf, unsigned long size, unsigned flags)
 	return ret;
 }
 
-int gpg_verify_tag(const struct object_id *oid, const char *name_to_report,
-		unsigned flags)
+int gpg_verify_tag(struct repository *r, const struct object_id *oid,
+		   const char *name_to_report, unsigned flags)
 {
 	enum object_type type;
 	char *buf;
 	unsigned long size;
 	int ret;
 
-	type = oid_object_info(the_repository, oid, NULL);
+	type = odb_read_object_info(r->objects, oid, NULL);
 	if (type != OBJ_TAG)
 		return error("%s: cannot verify a non-tag object of type %s.",
 				name_to_report ?
 				name_to_report :
-				repo_find_unique_abbrev(the_repository, oid, DEFAULT_ABBREV),
+				oid_to_hex(oid),
 				type_name(type));
 
-	buf = repo_read_object_file(the_repository, oid, &type, &size);
+	buf = odb_read_object(r->objects, oid, &type, &size);
 	if (!buf)
 		return error("%s: unable to read file.",
 				name_to_report ?
 				name_to_report :
-				repo_find_unique_abbrev(the_repository, oid, DEFAULT_ABBREV));
+				oid_to_hex(oid));
 
 	ret = run_gpg_verify(buf, size, flags);
 
@@ -84,23 +85,11 @@ struct object *deref_tag(struct repository *r, struct object *o, const char *war
 			o = NULL;
 		}
 	if (!o && warn) {
-		if (last_oid && is_promisor_object(last_oid))
+		if (last_oid && is_promisor_object(r, last_oid))
 			return NULL;
 		if (!warnlen)
 			warnlen = strlen(warn);
 		error("missing object referenced by '%.*s'", warnlen, warn);
-	}
-	return o;
-}
-
-struct object *deref_tag_noverify(struct repository *r, struct object *o)
-{
-	while (o && o->type == OBJ_TAG) {
-		o = parse_object(r, &o->oid);
-		if (o && o->type == OBJ_TAG && ((struct tag *)o)->tagged)
-			o = ((struct tag *)o)->tagged;
-		else
-			o = NULL;
 	}
 	return o;
 }
@@ -159,9 +148,11 @@ int parse_tag_buffer(struct repository *r, struct tag *item, const void *data, u
 		FREE_AND_NULL(item->tag);
 	}
 
-	if (size < the_hash_algo->hexsz + 24)
+	if (size < r->hash_algo->hexsz + 24)
 		return -1;
-	if (memcmp("object ", bufptr, 7) || parse_oid_hex(bufptr + 7, &oid, &bufptr) || *bufptr++ != '\n')
+	if (memcmp("object ", bufptr, 7) ||
+	    parse_oid_hex_algop(bufptr + 7, &oid, &bufptr, r->hash_algo) ||
+	    *bufptr++ != '\n')
 		return -1;
 
 	if (!starts_with(bufptr, "type "))
@@ -212,7 +203,7 @@ int parse_tag_buffer(struct repository *r, struct tag *item, const void *data, u
 	return 0;
 }
 
-int parse_tag(struct tag *item)
+int parse_tag(struct repository *r, struct tag *item)
 {
 	enum object_type type;
 	void *data;
@@ -221,8 +212,7 @@ int parse_tag(struct tag *item)
 
 	if (item->object.parsed)
 		return 0;
-	data = repo_read_object_file(the_repository, &item->object.oid, &type,
-				     &size);
+	data = odb_read_object(r->objects, &item->object.oid, &type, &size);
 	if (!data)
 		return error("Could not read %s",
 			     oid_to_hex(&item->object.oid));
@@ -231,7 +221,7 @@ int parse_tag(struct tag *item)
 		return error("Object %s not a tag",
 			     oid_to_hex(&item->object.oid));
 	}
-	ret = parse_tag_buffer(the_repository, item, data, size);
+	ret = parse_tag_buffer(r, item, data, size);
 	free(data);
 	return ret;
 }

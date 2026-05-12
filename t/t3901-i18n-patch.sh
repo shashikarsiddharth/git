@@ -8,8 +8,13 @@ test_description='i18n settings and format-patch | am pipe'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
+
+if ! test_have_prereq ICONV
+then
+	skip_all='skipping patch i18n tests; iconv not available'
+	test_done
+fi
 
 check_encoding () {
 	# Make sure characters are not corrupted
@@ -23,7 +28,8 @@ check_encoding () {
 		8859)
 			grep "^encoding ISO8859-1" ;;
 		*)
-			grep "^encoding ISO8859-1"; test "$?" != 0 ;;
+			ret=0; grep "^encoding ISO8859-1" || ret=$?
+			test "$ret" != 0 ;;
 		esac || return 1
 		j=$i
 		i=$(($i+1))

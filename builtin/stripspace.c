@@ -1,3 +1,4 @@
+#define USE_THE_REPOSITORY_VARIABLE
 #include "builtin.h"
 #include "config.h"
 #include "environment.h"
@@ -29,7 +30,10 @@ enum stripspace_mode {
 	COMMENT_LINES
 };
 
-int cmd_stripspace(int argc, const char **argv, const char *prefix)
+int cmd_stripspace(int argc,
+		   const char **argv,
+		   const char *prefix,
+		   struct repository *repo UNUSED)
 {
 	struct strbuf buf = STRBUF_INIT;
 	enum stripspace_mode mode = STRIP_DEFAULT;
@@ -51,7 +55,7 @@ int cmd_stripspace(int argc, const char **argv, const char *prefix)
 
 	if (mode == STRIP_COMMENTS || mode == COMMENT_LINES) {
 		setup_git_directory_gently(&nongit);
-		git_config(git_default_config, NULL);
+		repo_config(the_repository, git_default_config, NULL);
 	}
 
 	if (strbuf_read(&buf, 0, 1024) < 0)

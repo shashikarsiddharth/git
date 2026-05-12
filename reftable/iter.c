@@ -1,19 +1,20 @@
 /*
-Copyright 2020 Google LLC
-
-Use of this source code is governed by a BSD-style
-license that can be found in the LICENSE file or at
-https://developers.google.com/open-source/licenses/bsd
-*/
+ * Copyright 2020 Google LLC
+ *
+ * Use of this source code is governed by a BSD-style
+ * license that can be found in the LICENSE file or at
+ * https://developers.google.com/open-source/licenses/bsd
+ */
 
 #include "iter.h"
 
 #include "system.h"
 
 #include "block.h"
+#include "blocksource.h"
 #include "constants.h"
-#include "reader.h"
 #include "reftable-error.h"
+#include "table.h"
 
 int iterator_seek(struct reftable_iterator *it, struct reftable_record *want)
 {
@@ -25,17 +26,17 @@ int iterator_next(struct reftable_iterator *it, struct reftable_record *rec)
 	return it->ops->next(it->iter_arg, rec);
 }
 
-static int empty_iterator_seek(void *arg UNUSED, struct reftable_record *want UNUSED)
+static int empty_iterator_seek(void *arg REFTABLE_UNUSED, struct reftable_record *want REFTABLE_UNUSED)
 {
 	return 0;
 }
 
-static int empty_iterator_next(void *arg UNUSED, struct reftable_record *rec UNUSED)
+static int empty_iterator_next(void *arg REFTABLE_UNUSED, struct reftable_record *rec REFTABLE_UNUSED)
 {
 	return 1;
 }
 
-static void empty_iterator_close(void *arg UNUSED)
+static void empty_iterator_close(void *arg REFTABLE_UNUSED)
 {
 }
 
@@ -55,7 +56,7 @@ void iterator_set_empty(struct reftable_iterator *it)
 static void filtering_ref_iterator_close(void *iter_arg)
 {
 	struct filtering_ref_iterator *fri = iter_arg;
-	strbuf_release(&fri->oid);
+	reftable_buf_release(&fri->oid);
 	reftable_iterator_destroy(&fri->it);
 }
 
@@ -113,9 +114,9 @@ static void indexed_table_ref_iter_close(void *p)
 {
 	struct indexed_table_ref_iter *it = p;
 	block_iter_close(&it->cur);
-	reftable_block_done(&it->block_reader.block);
+	block_source_release_data(&it->block.block_data);
 	reftable_free(it->offsets);
-	strbuf_release(&it->oid);
+	reftable_buf_release(&it->oid);
 }
 
 static int indexed_table_ref_iter_next_block(struct indexed_table_ref_iter *it)
@@ -127,11 +128,10 @@ static int indexed_table_ref_iter_next_block(struct indexed_table_ref_iter *it)
 		return 1;
 	}
 
-	reftable_block_done(&it->block_reader.block);
+	block_source_release_data(&it->block.block_data);
 
 	off = it->offsets[it->offset_idx++];
-	err = reader_init_block_reader(it->r, &it->block_reader, off,
-				       BLOCK_TYPE_REF);
+	err = table_init_block(it->table, &it->block, off, REFTABLE_BLOCK_TYPE_REF);
 	if (err < 0) {
 		return err;
 	}
@@ -139,15 +139,14 @@ static int indexed_table_ref_iter_next_block(struct indexed_table_ref_iter *it)
 		/* indexed block does not exist. */
 		return REFTABLE_FORMAT_ERROR;
 	}
-	block_iter_seek_start(&it->cur, &it->block_reader);
+	block_iter_init(&it->cur, &it->block);
 	return 0;
 }
 
-static int indexed_table_ref_iter_seek(void *p UNUSED,
-				       struct reftable_record *want UNUSED)
+static int indexed_table_ref_iter_seek(void *p REFTABLE_UNUSED,
+				       struct reftable_record *want REFTABLE_UNUSED)
 {
-	BUG("seeking indexed table is not supported");
-	return -1;
+	return REFTABLE_API_ERROR;
 }
 
 static int indexed_table_ref_iter_next(void *p, struct reftable_record *rec)
@@ -181,26 +180,41 @@ static int indexed_table_ref_iter_next(void *p, struct reftable_record *rec)
 	}
 }
 
-int new_indexed_table_ref_iter(struct indexed_table_ref_iter **dest,
-			       struct reftable_reader *r, uint8_t *oid,
+int indexed_table_ref_iter_new(struct indexed_table_ref_iter **dest,
+			       struct reftable_table *t, uint8_t *oid,
 			       int oid_len, uint64_t *offsets, int offset_len)
 {
 	struct indexed_table_ref_iter empty = INDEXED_TABLE_REF_ITER_INIT;
-	struct indexed_table_ref_iter *itr = reftable_calloc(1, sizeof(*itr));
+	struct indexed_table_ref_iter *itr;
 	int err = 0;
 
+	itr = reftable_calloc(1, sizeof(*itr));
+	if (!itr) {
+		err = REFTABLE_OUT_OF_MEMORY_ERROR;
+		goto out;
+	}
+
 	*itr = empty;
-	itr->r = r;
-	strbuf_add(&itr->oid, oid, oid_len);
+	itr->table = t;
+
+	err = reftable_buf_add(&itr->oid, oid, oid_len);
+	if (err < 0)
+		goto out;
 
 	itr->offsets = offsets;
 	itr->offset_len = offset_len;
 
 	err = indexed_table_ref_iter_next_block(itr);
+	if (err < 0)
+		goto out;
+
+	*dest = itr;
+	err = 0;
+
+out:
 	if (err < 0) {
+		*dest = NULL;
 		reftable_free(itr);
-	} else {
-		*dest = itr;
 	}
 	return err;
 }
@@ -225,14 +239,14 @@ void reftable_iterator_destroy(struct reftable_iterator *it)
 		return;
 	it->ops->close(it->iter_arg);
 	it->ops = NULL;
-	FREE_AND_NULL(it->iter_arg);
+	REFTABLE_FREE_AND_NULL(it->iter_arg);
 }
 
 int reftable_iterator_seek_ref(struct reftable_iterator *it,
 			       const char *name)
 {
 	struct reftable_record want = {
-		.type = BLOCK_TYPE_REF,
+		.type = REFTABLE_BLOCK_TYPE_REF,
 		.u.ref = {
 			.refname = (char *)name,
 		},
@@ -244,7 +258,7 @@ int reftable_iterator_next_ref(struct reftable_iterator *it,
 			       struct reftable_ref_record *ref)
 {
 	struct reftable_record rec = {
-		.type = BLOCK_TYPE_REF,
+		.type = REFTABLE_BLOCK_TYPE_REF,
 		.u = {
 			.ref = *ref
 		},
@@ -258,7 +272,7 @@ int reftable_iterator_seek_log_at(struct reftable_iterator *it,
 				  const char *name, uint64_t update_index)
 {
 	struct reftable_record want = {
-		.type = BLOCK_TYPE_LOG,
+		.type = REFTABLE_BLOCK_TYPE_LOG,
 		.u.log = {
 			.refname = (char *)name,
 			.update_index = update_index,
@@ -277,7 +291,7 @@ int reftable_iterator_next_log(struct reftable_iterator *it,
 			       struct reftable_log_record *log)
 {
 	struct reftable_record rec = {
-		.type = BLOCK_TYPE_LOG,
+		.type = REFTABLE_BLOCK_TYPE_LOG,
 		.u = {
 			.log = *log,
 		},

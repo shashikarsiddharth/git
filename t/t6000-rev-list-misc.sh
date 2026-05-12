@@ -5,7 +5,6 @@ test_description='miscellaneous rev-list tests'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success setup '
@@ -181,6 +180,118 @@ test_expect_success 'rev-list --unpacked' '
 	sort actual.raw >actual &&
 
 	test_cmp expect actual
+'
+
+test_expect_success 'rev-list one-sided unrelated symmetric diff' '
+	test_tick &&
+	git commit --allow-empty -m xyz &&
+	git branch cmp &&
+	git rebase --force-rebase --root &&
+
+	git rev-list --left-only  HEAD...cmp >head &&
+	git rev-list --right-only HEAD...cmp >cmp  &&
+
+	sort head >head.sorted &&
+	sort cmp >cmp.sorted &&
+	comm -12 head.sorted cmp.sorted >actual &&
+	test_line_count = 0 actual
+'
+
+test_expect_success 'rev-list -z' '
+	test_when_finished rm -rf repo &&
+
+	git init repo &&
+	test_commit -C repo 1 &&
+	test_commit -C repo 2 &&
+
+	oid1=$(git -C repo rev-parse HEAD~) &&
+	oid2=$(git -C repo rev-parse HEAD) &&
+
+	printf "%s\0%s\0" "$oid2" "$oid1" >expect &&
+	git -C repo rev-list -z HEAD >actual &&
+
+	test_cmp expect actual
+'
+
+test_expect_success 'rev-list -z --objects' '
+	test_when_finished rm -rf repo &&
+
+	git init repo &&
+	test_commit -C repo 1 &&
+	test_commit -C repo 2 &&
+
+	oid1=$(git -C repo rev-parse HEAD:1.t) &&
+	oid2=$(git -C repo rev-parse HEAD:2.t) &&
+	path1=1.t &&
+	path2=2.t &&
+
+	printf "%s\0path=%s\0%s\0path=%s\0" "$oid1" "$path1" "$oid2" "$path2" \
+		>expect &&
+	git -C repo rev-list -z --objects HEAD:1.t HEAD:2.t >actual &&
+
+	test_cmp expect actual
+'
+
+test_expect_success 'rev-list -z --boundary' '
+	test_when_finished rm -rf repo &&
+
+	git init repo &&
+	test_commit -C repo 1 &&
+	test_commit -C repo 2 &&
+
+	oid1=$(git -C repo rev-parse HEAD~) &&
+	oid2=$(git -C repo rev-parse HEAD) &&
+
+	printf "%s\0%s\0boundary=yes\0" "$oid2" "$oid1" >expect &&
+	git -C repo rev-list -z --boundary HEAD~.. >actual &&
+
+	test_cmp expect actual
+'
+
+test_expect_success 'rev-list --boundary incompatible with --maximal-only' '
+	test_when_finished rm -rf repo &&
+
+	git init repo &&
+	test_commit -C repo 1 &&
+	test_commit -C repo 2 &&
+
+	oid1=$(git -C repo rev-parse HEAD~) &&
+	oid2=$(git -C repo rev-parse HEAD) &&
+
+	test_must_fail git -C repo rev-list --boundary --maximal-only \
+		HEAD~1..HEAD 2>err &&
+	test_grep "cannot be used together" err
+'
+
+test_expect_success 'rev-list --maximal-only and --pretty' '
+	test_when_finished rm -rf repo &&
+
+	git init repo &&
+	test_commit -C repo 1 &&
+	oid1=$(git -C repo rev-parse HEAD) &&
+	test_commit -C repo 2 &&
+	oid2=$(git -C repo rev-parse HEAD) &&
+	git -C repo checkout --detach HEAD~1 &&
+	test_commit -C repo 3 &&
+	oid3=$(git -C repo rev-parse HEAD) &&
+
+	cat >expect <<-EOF &&
+	commit $oid3
+	$oid3
+	commit $oid2
+	$oid2
+	EOF
+
+	git -C repo rev-list --pretty="%H" --maximal-only $oid1 $oid2 $oid3 >out &&
+	test_cmp expect out &&
+
+	cat >expect <<-EOF &&
+	$oid3
+	$oid2
+	EOF
+
+	git -C repo log --pretty="%H" --maximal-only $oid1 $oid2 $oid3 >out &&
+	test_cmp expect out
 '
 
 test_done

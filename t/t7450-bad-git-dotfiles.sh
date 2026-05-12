@@ -13,7 +13,6 @@ Such as:
   - symlinked .gitmodules, etc
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-pack.sh
 
@@ -221,17 +220,19 @@ check_dotx_symlink () {
 		)
 	'
 
-	test -n "$refuse_index" &&
-	test_expect_success "refuse to load symlinked $name into index ($type)" '
-		test_must_fail \
-			git -C $dir \
-			    -c core.protectntfs \
-			    -c core.protecthfs \
-			    read-tree $tree 2>err &&
-		grep "invalid path.*$name" err &&
-		git -C $dir ls-files -s >out &&
-		test_must_be_empty out
-	'
+	if test -n "$refuse_index"
+	then
+		test_expect_success "refuse to load symlinked $name into index ($type)" '
+			test_must_fail \
+				git -C $dir \
+				    -c core.protectntfs \
+				    -c core.protecthfs \
+				    read-tree $tree 2>err &&
+			grep "invalid path.*$name" err &&
+			git -C $dir ls-files -s >out &&
+			test_must_be_empty out
+		'
+	fi
 }
 
 check_dotx_symlink gitmodules vanilla .gitmodules
@@ -371,6 +372,39 @@ test_expect_success 'checkout -f --recurse-submodules must not use a nested gitd
 	cat err &&
 	grep "is inside git dir" err &&
 	test_path_is_missing nested_checkout/thing2/.git
+'
+
+test_expect_success SYMLINKS,!WINDOWS,!MINGW 'submodule must not checkout into different directory' '
+	test_when_finished "rm -rf sub repo bad-clone" &&
+
+	git init sub &&
+	write_script sub/post-checkout <<-\EOF &&
+	touch "$PWD/foo"
+	EOF
+	git -C sub add post-checkout &&
+	git -C sub commit -m hook &&
+
+	git init repo &&
+	git -C repo -c protocol.file.allow=always submodule add "$PWD/sub" sub &&
+	git -C repo mv sub $(printf "sub\r") &&
+
+	# Ensure config values containing CR are wrapped in quotes.
+	git config unset -f repo/.gitmodules submodule.sub.path &&
+	printf "\tpath = \"sub\r\"\n" >>repo/.gitmodules &&
+
+	git config unset -f repo/.git/modules/sub/config core.worktree &&
+	{
+		printf "[core]\n" &&
+		printf "\tworktree = \"../../../sub\r\"\n"
+	} >>repo/.git/modules/sub/config &&
+
+	ln -s .git/modules/sub/hooks repo/sub &&
+	git -C repo add -A &&
+	git -C repo commit -m submodule &&
+
+	git -c protocol.file.allow=always clone --recurse-submodules repo bad-clone &&
+	! test -f "$PWD/bad-clone/sub/foo" &&
+	test -f $(printf "bad-clone/sub\r/post-checkout")
 '
 
 test_done

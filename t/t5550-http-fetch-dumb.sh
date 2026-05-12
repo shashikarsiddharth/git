@@ -102,6 +102,31 @@ test_expect_success 'cloning password-protected repository can fail' '
 	expect_askpass both wrong
 '
 
+test_expect_success 'using credentials from netrc to clone successfully' '
+	test_when_finished clear_netrc &&
+	set_askpass wrong &&
+	set_netrc 127.0.0.1 user@host pass@host &&
+	git clone "$HTTPD_URL/auth/dumb/repo.git" clone-auth-netrc &&
+	expect_askpass none
+'
+
+test_expect_success 'netrc unauthorized credentials (prompt after 401)' '
+	test_when_finished clear_netrc &&
+	set_askpass wrong &&
+	set_netrc 127.0.0.1 user@host pass@wrong &&
+	test_must_fail git clone "$HTTPD_URL/auth/dumb/repo.git" clone-auth-netrc-401 &&
+	expect_askpass both wrong
+'
+
+test_expect_success 'netrc authorized but forbidden credentials (fail on 403)' '
+	test_when_finished clear_netrc &&
+	set_askpass wrong &&
+	set_netrc 127.0.0.1 forbidden-user@host pass@host &&
+	test_must_fail git clone "$HTTPD_URL/auth/dumb/repo.git" clone-auth-netrc-403 2>err &&
+	expect_askpass none &&
+	grep "The requested URL returned error: 403" err
+'
+
 test_expect_success 'http auth can use user/pass in URL' '
 	set_askpass wrong &&
 	git clone "$HTTPD_URL_USER_PASS/auth/dumb/repo.git" clone-auth-none &&
@@ -111,13 +136,13 @@ test_expect_success 'http auth can use user/pass in URL' '
 test_expect_success 'http auth can use just user in URL' '
 	set_askpass wrong pass@host &&
 	git clone "$HTTPD_URL_USER/auth/dumb/repo.git" clone-auth-pass &&
-	expect_askpass pass user@host
+	expect_askpass pass user%40host
 '
 
 test_expect_success 'http auth can request both user and pass' '
 	set_askpass user@host pass@host &&
 	git clone "$HTTPD_URL/auth/dumb/repo.git" clone-auth-both &&
-	expect_askpass both user@host
+	expect_askpass both user%40host
 '
 
 test_expect_success 'http auth respects credential helper config' '
@@ -135,14 +160,14 @@ test_expect_success 'http auth can get username from config' '
 	test_config_global "credential.$HTTPD_URL.username" user@host &&
 	set_askpass wrong pass@host &&
 	git clone "$HTTPD_URL/auth/dumb/repo.git" clone-auth-user &&
-	expect_askpass pass user@host
+	expect_askpass pass user%40host
 '
 
 test_expect_success 'configured username does not override URL' '
 	test_config_global "credential.$HTTPD_URL.username" wrong &&
 	set_askpass wrong pass@host &&
 	git clone "$HTTPD_URL_USER/auth/dumb/repo.git" clone-auth-user2 &&
-	expect_askpass pass user@host
+	expect_askpass pass user%40host
 '
 
 test_expect_success 'set up repo with http submodules' '
@@ -163,7 +188,7 @@ test_expect_success 'cmdline credential config passes to submodule via clone' '
 	set_askpass wrong pass@host &&
 	git -c "credential.$HTTPD_URL.username=user@host" \
 		clone --recursive super super-clone &&
-	expect_askpass pass user@host
+	expect_askpass pass user%40host
 '
 
 test_expect_success 'cmdline credential config passes submodule via fetch' '
@@ -174,7 +199,7 @@ test_expect_success 'cmdline credential config passes submodule via fetch' '
 	git -C super-clone \
 	    -c "credential.$HTTPD_URL.username=user@host" \
 	    fetch --recurse-submodules &&
-	expect_askpass pass user@host
+	expect_askpass pass user%40host
 '
 
 test_expect_success 'cmdline credential config passes submodule update' '
@@ -191,7 +216,7 @@ test_expect_success 'cmdline credential config passes submodule update' '
 	git -C super-clone \
 	    -c "credential.$HTTPD_URL.username=user@host" \
 	    submodule update &&
-	expect_askpass pass user@host
+	expect_askpass pass user%40host
 '
 
 test_expect_success 'fetch changes via http' '
@@ -306,6 +331,14 @@ test_expect_success 'fetch notices corrupt idx' '
 	)
 '
 
+# usage: count_fetches <nr> <extension> <trace_file>
+count_fetches () {
+	# ignore grep exit code; it may return non-zero if we are expecting no
+	# matches
+	grep "GET .*objects/pack/pack-[a-z0-9]*.$2" "$3" >trace.count
+	test_line_count = "$1" trace.count
+}
+
 test_expect_success 'fetch can handle previously-fetched .idx files' '
 	git checkout --orphan branch1 &&
 	echo base >file &&
@@ -320,37 +353,43 @@ test_expect_success 'fetch can handle previously-fetched .idx files' '
 	git push "$HTTPD_DOCUMENT_ROOT_PATH"/repo_packed_branches.git branch2 &&
 	git --git-dir="$HTTPD_DOCUMENT_ROOT_PATH"/repo_packed_branches.git repack -d &&
 	git --bare init clone_packed_branches.git &&
-	git --git-dir=clone_packed_branches.git fetch "$HTTPD_URL"/dumb/repo_packed_branches.git branch1:branch1 &&
-	git --git-dir=clone_packed_branches.git fetch "$HTTPD_URL"/dumb/repo_packed_branches.git branch2:branch2
+	GIT_TRACE_CURL=$PWD/one.trace git --git-dir=clone_packed_branches.git \
+		fetch "$HTTPD_URL"/dumb/repo_packed_branches.git branch1:branch1 &&
+	count_fetches 2 idx one.trace &&
+	count_fetches 1 pack one.trace &&
+	GIT_TRACE_CURL=$PWD/two.trace git --git-dir=clone_packed_branches.git \
+		fetch "$HTTPD_URL"/dumb/repo_packed_branches.git branch2:branch2 &&
+	count_fetches 1 idx two.trace &&
+	count_fetches 1 pack two.trace
 '
 
 test_expect_success 'did not use upload-pack service' '
-	! grep "/git-upload-pack" "$HTTPD_ROOT_PATH/access.log"
+	test_grep ! "/git-upload-pack" "$HTTPD_ROOT_PATH/access.log"
 '
 
-test_expect_success 'git client shows text/plain errors' '
+test_expect_success ICONV 'git client shows text/plain errors' '
 	test_must_fail git clone "$HTTPD_URL/error/text" 2>stderr &&
-	grep "this is the error message" stderr
+	test_grep "this is the error message" stderr
 '
 
-test_expect_success 'git client does not show html errors' '
+test_expect_success ICONV 'git client does not show html errors' '
 	test_must_fail git clone "$HTTPD_URL/error/html" 2>stderr &&
-	! grep "this is the error message" stderr
+	test_grep ! "this is the error message" stderr
 '
 
-test_expect_success 'git client shows text/plain with a charset' '
+test_expect_success ICONV 'git client shows text/plain with a charset' '
 	test_must_fail git clone "$HTTPD_URL/error/charset" 2>stderr &&
-	grep "this is the error message" stderr
+	test_grep "this is the error message" stderr
 '
 
-test_expect_success 'http error messages are reencoded' '
+test_expect_success ICONV 'http error messages are reencoded' '
 	test_must_fail git clone "$HTTPD_URL/error/utf16" 2>stderr &&
-	grep "this is the error message" stderr
+	test_grep "this is the error message" stderr
 '
 
-test_expect_success 'reencoding is robust to whitespace oddities' '
+test_expect_success ICONV 'reencoding is robust to whitespace oddities' '
 	test_must_fail git clone "$HTTPD_URL/error/odd-spacing" 2>stderr &&
-	grep "this is the error message" stderr
+	test_grep "this is the error message" stderr
 '
 
 check_language () {
@@ -392,7 +431,7 @@ ja;q=0.95, zh;q=0.94, sv;q=0.93, pt;q=0.92, nb;q=0.91, *;q=0.90" \
 
 test_expect_success 'git client send an empty Accept-Language' '
 	GIT_TRACE_CURL=true LANGUAGE= git ls-remote "$HTTPD_URL/dumb/repo.git" 2>stderr &&
-	! grep "^=> Send header: Accept-Language:" stderr
+	test_grep ! "^=> Send header: Accept-Language:" stderr
 '
 
 test_expect_success 'remote-http complains cleanly about malformed urls' '
@@ -504,6 +543,16 @@ test_expect_success 'fetching via http alternates works' '
 	git -C "$child" update-server-info &&
 
 	git -c http.followredirects=true clone "$HTTPD_URL/dumb/alt-child.git"
+'
+
+test_expect_success 'dumb http can fetch index v1' '
+	server=$HTTPD_DOCUMENT_ROOT_PATH/idx-v1.git &&
+	git init --bare "$server" &&
+	git -C "$server" --work-tree=. commit --allow-empty -m foo &&
+	git -C "$server" -c pack.indexVersion=1 gc &&
+
+	git clone "$HTTPD_URL/dumb/idx-v1.git" &&
+	git -C idx-v1 fsck
 '
 
 test_done

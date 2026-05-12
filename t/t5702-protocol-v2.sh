@@ -185,6 +185,43 @@ test_expect_success 'server-options are sent when using ls-remote' '
 	grep "server-option=world" log
 '
 
+test_expect_success 'server-options from configuration are used by ls-remote' '
+	test_when_finished "rm -rf log myclone" &&
+	git clone "file://$(pwd)/file_parent" myclone &&
+	cat >expect <<-EOF &&
+	$(git -C file_parent rev-parse refs/heads/main)$(printf "\t")refs/heads/main
+	EOF
+
+	# Default server options from configuration are used
+	git -C myclone config --add remote.origin.serverOption foo &&
+	git -C myclone config --add remote.origin.serverOption bar &&
+	GIT_TRACE_PACKET="$(pwd)/log" git -C myclone -c protocol.version=2 \
+		ls-remote origin main >actual &&
+	test_cmp expect actual &&
+	test_grep "ls-remote> server-option=foo" log &&
+	test_grep "ls-remote> server-option=bar" log &&
+	rm -f log &&
+
+	# Empty value of remote.<name>.serverOption clears the list
+	git -C myclone config --add remote.origin.serverOption "" &&
+	git -C myclone config --add remote.origin.serverOption tar &&
+	GIT_TRACE_PACKET="$(pwd)/log" git -C myclone -c protocol.version=2 \
+		ls-remote origin main >actual &&
+	test_cmp expect actual &&
+	test_grep "ls-remote> server-option=tar" log &&
+	test_grep ! "ls-remote> server-option=foo" log &&
+	test_grep ! "ls-remote> server-option=bar" log &&
+	rm -f log &&
+
+	# Server option from command line overrides those from configuration
+	GIT_TRACE_PACKET="$(pwd)/log" git -C myclone -c protocol.version=2 \
+		ls-remote -o hello -o world origin main >actual &&
+	test_cmp expect actual &&
+	test_grep "ls-remote> server-option=hello" log &&
+	test_grep "ls-remote> server-option=world" log &&
+	test_grep ! "ls-remote> server-option=tar" log
+'
+
 test_expect_success 'warn if using server-option with ls-remote with legacy protocol' '
 	test_must_fail env GIT_TEST_PROTOCOL_VERSION=0 git -c protocol.version=0 \
 		ls-remote -o hello -o world "file://$(pwd)/file_parent" main 2>err &&
@@ -381,6 +418,54 @@ test_expect_success 'server-options are sent when fetching' '
 	grep "server-option=world" log
 '
 
+test_expect_success 'server-options are sent when fetch multiple remotes' '
+	test_when_finished "rm -f log server_options_sent" &&
+	git clone "file://$(pwd)/file_parent" child_multi_remotes &&
+	git -C child_multi_remotes remote add another "file://$(pwd)/file_parent" &&
+	GIT_TRACE_PACKET="$(pwd)/log" git -C child_multi_remotes -c protocol.version=2 \
+		fetch -o hello --all &&
+	grep "fetch> server-option=hello" log >server_options_sent &&
+	test_line_count = 2 server_options_sent
+'
+
+test_expect_success 'server-options from configuration are used by git-fetch' '
+	test_when_finished "rm -rf log myclone" &&
+	git clone "file://$(pwd)/file_parent" myclone &&
+	git -C file_parent log -1 --format=%s >expect &&
+
+	# Default server options from configuration are used
+	git -C myclone config --add remote.origin.serverOption foo &&
+	git -C myclone config --add remote.origin.serverOption bar &&
+	GIT_TRACE_PACKET="$(pwd)/log" git -C myclone -c protocol.version=2 \
+		fetch origin main &&
+	git -C myclone log -1 --format=%s origin/main >actual &&
+	test_cmp expect actual &&
+	test_grep "fetch> server-option=foo" log &&
+	test_grep "fetch> server-option=bar" log &&
+	rm -f log &&
+
+	# Empty value of remote.<name>.serverOption clears the list
+	git -C myclone config --add remote.origin.serverOption "" &&
+	git -C myclone config --add remote.origin.serverOption tar &&
+	GIT_TRACE_PACKET="$(pwd)/log" git -C myclone -c protocol.version=2 \
+		fetch origin main &&
+	git -C myclone log -1 --format=%s origin/main >actual &&
+	test_cmp expect actual &&
+	test_grep "fetch> server-option=tar" log &&
+	test_grep ! "fetch> server-option=foo" log &&
+	test_grep ! "fetch> server-option=bar" log &&
+	rm -f log &&
+
+	# Server option from command line overrides those from configuration
+	GIT_TRACE_PACKET="$(pwd)/log" git -C myclone -c protocol.version=2 \
+		fetch -o hello -o world origin main &&
+	git -C myclone log -1 --format=%s origin/main >actual &&
+	test_cmp expect actual &&
+	test_grep "fetch> server-option=hello" log &&
+	test_grep "fetch> server-option=world" log &&
+	test_grep ! "fetch> server-option=tar" log
+'
+
 test_expect_success 'warn if using server-option with fetch with legacy protocol' '
 	test_when_finished "rm -rf temp_child" &&
 
@@ -404,6 +489,37 @@ test_expect_success 'server-options are sent when cloning' '
 	grep "server-option=world" log
 '
 
+test_expect_success 'server-options from configuration are used by git-clone' '
+	test_when_finished "rm -rf log myclone" &&
+
+	# Default server options from configuration are used
+	GIT_TRACE_PACKET="$(pwd)/log" git -c protocol.version=2 \
+		-c remote.origin.serverOption=foo -c remote.origin.serverOption=bar \
+		clone "file://$(pwd)/file_parent" myclone &&
+	test_grep "clone> server-option=foo" log &&
+	test_grep "clone> server-option=bar" log &&
+	rm -rf log myclone &&
+
+	# Empty value of remote.<name>.serverOption clears the list
+	GIT_TRACE_PACKET="$(pwd)/log" git -c protocol.version=2 \
+		-c remote.origin.serverOption=foo -c remote.origin.serverOption=bar \
+		-c remote.origin.serverOption= -c remote.origin.serverOption=tar \
+		clone "file://$(pwd)/file_parent" myclone &&
+	test_grep "clone> server-option=tar" log &&
+	test_grep ! "clone> server-option=foo" log &&
+	test_grep ! "clone> server-option=bar" log &&
+	rm -rf log myclone &&
+
+	# Server option from command line overrides those from configuration
+	GIT_TRACE_PACKET="$(pwd)/log" git -c protocol.version=2 \
+		-c remote.origin.serverOption=tar \
+		clone --server-option=hello --server-option=world \
+		"file://$(pwd)/file_parent" myclone &&
+	test_grep "clone> server-option=hello" log &&
+	test_grep "clone> server-option=world" log &&
+	test_grep ! "clone> server-option=tar" log
+'
+
 test_expect_success 'warn if using server-option with clone with legacy protocol' '
 	test_when_finished "rm -rf myclone" &&
 
@@ -413,6 +529,23 @@ test_expect_success 'warn if using server-option with clone with legacy protocol
 
 	test_grep "see protocol.version in" err &&
 	test_grep "server options require protocol version 2 or later" err
+'
+
+test_expect_success 'server-option configuration with legacy protocol is ok' '
+	test_when_finished "rm -rf myclone" &&
+
+	env GIT_TEST_PROTOCOL_VERSION=0 git -c protocol.version=0 \
+		-c remote.origin.serverOption=foo -c remote.origin.serverOption=bar \
+		clone "file://$(pwd)/file_parent" myclone
+'
+
+test_expect_success 'invalid server-option configuration' '
+	test_when_finished "rm -rf myclone" &&
+
+	test_must_fail git -c protocol.version=2 \
+		-c remote.origin.serverOption \
+		clone "file://$(pwd)/file_parent" myclone 2>err &&
+	test_grep "error: missing value for '\''remote.origin.serveroption'\''" err
 '
 
 test_expect_success 'upload-pack respects config using protocol v2' '
@@ -532,7 +665,7 @@ test_expect_success 'even with handcrafted request, filter does not work if not 
 	test-tool -C server serve-v2 --stateless-rpc <in >/dev/null
 '
 
-test_expect_success 'default refspec is used to filter ref when fetchcing' '
+test_expect_success 'default refspec is used to filter ref when fetching' '
 	test_when_finished "rm -f log" &&
 
 	GIT_TRACE_PACKET="$(pwd)/log" git -C file_child -c protocol.version=2 \
@@ -544,6 +677,48 @@ test_expect_success 'default refspec is used to filter ref when fetchcing' '
 
 	grep "ref-prefix refs/heads/" log &&
 	grep "ref-prefix refs/tags/" log
+'
+
+test_expect_success 'set up parent for prefix tests' '
+	git init prefix-parent &&
+	git -C prefix-parent commit --allow-empty -m foo &&
+	git -C prefix-parent tag my-tag &&
+	git -C prefix-parent branch unrelated-branch
+'
+
+test_expect_success 'empty refspec filters refs when fetching' '
+	git init configless-child &&
+
+	test_when_finished "rm -f log" &&
+	GIT_TRACE_PACKET="$(pwd)/log" \
+		git -C configless-child fetch ../prefix-parent &&
+	test_grep ! unrelated-branch log
+'
+
+test_expect_success 'exact oid fetch with tag following' '
+	git init exact-oid-tags &&
+
+	commit=$(git -C prefix-parent rev-parse --verify HEAD) &&
+
+	test_when_finished "rm -f log" &&
+	GIT_TRACE_PACKET="$(pwd)/log" \
+		git -C exact-oid-tags fetch ../prefix-parent \
+			$commit:refs/heads/exact &&
+	test_grep ! unrelated-branch log &&
+	git -C exact-oid-tags rev-parse --verify my-tag
+'
+
+test_expect_success 'exact oid fetch avoids pointless HEAD request' '
+	git init exact-oid-head &&
+	git -C exact-oid-head remote add origin ../prefix-parent &&
+
+	commit=$(git -C prefix-parent rev-parse --verify HEAD) &&
+
+	test_when_finished "rm -f log" &&
+	GIT_TRACE_PACKET="$(pwd)/log" \
+		git -C exact-oid-head fetch --no-tags origin \
+			$commit:refs/heads/exact &&
+	test_grep ! command=ls-refs log
 '
 
 test_expect_success 'fetch supports various ways of have lines' '
@@ -999,11 +1174,12 @@ test_expect_success 'when server sends "ready", expect DELIM' '
 
 	# After "ready" in the acknowledgments section, pretend that a FLUSH
 	# (0000) was sent instead of a DELIM (0001).
-	printf "\$ready = 1 if /ready/; \$ready && s/0001/0000/" \
-		>"$HTTPD_ROOT_PATH/one-time-perl" &&
+	write_script "$HTTPD_ROOT_PATH/one-time-script" <<-\EOF &&
+	sed "/ready/{n;s/0001/0000/;}" "$1"
+	EOF
 
 	test_must_fail git -C http_child -c protocol.version=2 \
-		fetch "$HTTPD_URL/one_time_perl/http_parent" 2> err &&
+		fetch "$HTTPD_URL/one_time_script/http_parent" 2> err &&
 	test_grep "expected packfile to be sent after .ready." err
 '
 
@@ -1024,12 +1200,13 @@ test_expect_success 'when server does not send "ready", expect FLUSH' '
 
 	# After the acknowledgments section, pretend that a DELIM
 	# (0001) was sent instead of a FLUSH (0000).
-	printf "\$ack = 1 if /acknowledgments/; \$ack && s/0000/0001/" \
-		>"$HTTPD_ROOT_PATH/one-time-perl" &&
+	write_script "$HTTPD_ROOT_PATH/one-time-script" <<-\EOF &&
+	sed "/acknowledgments/,//{s/0000/0001/;}" "$1"
+	EOF
 
 	test_must_fail env GIT_TRACE_PACKET="$(pwd)/log" git -C http_child \
 		-c protocol.version=2 \
-		fetch "$HTTPD_URL/one_time_perl/http_parent" 2> err &&
+		fetch "$HTTPD_URL/one_time_script/http_parent" 2> err &&
 	grep "fetch< .*acknowledgments" log &&
 	! grep "fetch< .*ready" log &&
 	test_grep "expected no other sections to be sent after no .ready." err
@@ -1315,12 +1492,13 @@ test_expect_success 'http:// --negotiate-only' '
 
 test_expect_success 'http:// --negotiate-only without wait-for-done support' '
 	SERVER="server" &&
-	URI="$HTTPD_URL/one_time_perl/server" &&
+	URI="$HTTPD_URL/one_time_script/server" &&
 
 	setup_negotiate_only "$SERVER" "$URI" &&
 
-	echo "s/ wait-for-done/ xxxx-xxx-xxxx/" \
-		>"$HTTPD_ROOT_PATH/one-time-perl" &&
+	write_script "$HTTPD_ROOT_PATH/one-time-script" <<-\EOF &&
+	sed "s/ wait-for-done/ xxxx-xxx-xxxx/" "$1"
+	EOF
 
 	test_must_fail git -c protocol.version=2 -C client fetch \
 		--no-tags \

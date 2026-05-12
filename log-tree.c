@@ -1,4 +1,5 @@
 #define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
 #include "commit-reach.h"
@@ -8,7 +9,7 @@
 #include "environment.h"
 #include "hex.h"
 #include "object-name.h"
-#include "object-store-ll.h"
+#include "object-file.h"
 #include "repository.h"
 #include "tmp-objdir.h"
 #include "commit.h"
@@ -56,7 +57,7 @@ static const char *color_decorate_slots[] = {
 	[DECORATION_GRAFTED]	= "grafted",
 };
 
-static const char *decorate_get_color(int decorate_use_color, enum decoration_type ix)
+static const char *decorate_get_color(enum git_colorbool decorate_use_color, enum decoration_type ix)
 {
 	if (want_color(decorate_use_color))
 		return decoration_colors[ix];
@@ -146,9 +147,7 @@ static int ref_filter_match(const char *refname,
 	return 1;
 }
 
-static int add_ref_decoration(const char *refname, const char *referent UNUSED, const struct object_id *oid,
-			      int flags UNUSED,
-			      void *cb_data)
+static int add_ref_decoration(const struct reference *ref, void *cb_data)
 {
 	int i;
 	struct object *obj;
@@ -157,16 +156,16 @@ static int add_ref_decoration(const char *refname, const char *referent UNUSED, 
 	struct decoration_filter *filter = (struct decoration_filter *)cb_data;
 	const char *git_replace_ref_base = ref_namespace[NAMESPACE_REPLACE].ref;
 
-	if (filter && !ref_filter_match(refname, filter))
+	if (filter && !ref_filter_match(ref->name, filter))
 		return 0;
 
-	if (starts_with(refname, git_replace_ref_base)) {
+	if (starts_with(ref->name, git_replace_ref_base)) {
 		struct object_id original_oid;
 		if (!replace_refs_enabled(the_repository))
 			return 0;
-		if (get_oid_hex(refname + strlen(git_replace_ref_base),
+		if (get_oid_hex(ref->name + strlen(git_replace_ref_base),
 				&original_oid)) {
-			warning("invalid replace ref %s", refname);
+			warning("invalid replace ref %s", ref->name);
 			return 0;
 		}
 		obj = parse_object(the_repository, &original_oid);
@@ -175,10 +174,10 @@ static int add_ref_decoration(const char *refname, const char *referent UNUSED, 
 		return 0;
 	}
 
-	objtype = oid_object_info(the_repository, oid, NULL);
+	objtype = odb_read_object_info(the_repository->objects, ref->oid, NULL);
 	if (objtype < 0)
 		return 0;
-	obj = lookup_object_by_type(the_repository, oid, objtype);
+	obj = lookup_object_by_type(the_repository, ref->oid, objtype);
 
 	for (i = 0; i < ARRAY_SIZE(ref_namespace); i++) {
 		struct ref_namespace_info *info = &ref_namespace[i];
@@ -186,24 +185,24 @@ static int add_ref_decoration(const char *refname, const char *referent UNUSED, 
 		if (!info->decoration)
 			continue;
 		if (info->exact) {
-			if (!strcmp(refname, info->ref)) {
+			if (!strcmp(ref->name, info->ref)) {
 				deco_type = info->decoration;
 				break;
 			}
-		} else if (starts_with(refname, info->ref)) {
+		} else if (starts_with(ref->name, info->ref)) {
 			deco_type = info->decoration;
 			break;
 		}
 	}
 
-	add_name_decoration(deco_type, refname, obj);
+	add_name_decoration(deco_type, ref->name, obj);
 	while (obj->type == OBJ_TAG) {
 		if (!obj->parsed)
 			parse_object(the_repository, &obj->oid);
 		obj = ((struct tag *)obj)->tagged;
 		if (!obj)
 			break;
-		add_name_decoration(DECORATION_REF_TAG, refname, obj);
+		add_name_decoration(DECORATION_REF_TAG, ref->name, obj);
 	}
 	return 0;
 }
@@ -232,6 +231,11 @@ void load_ref_decorations(struct decoration_filter *filter, int flags)
 			for_each_string_list_item(item, filter->exclude_ref_config_pattern) {
 				normalize_glob_ref(item, NULL, item->string);
 			}
+
+			/* normalize_glob_ref duplicates the strings */
+			filter->exclude_ref_pattern->strdup_strings = 1;
+			filter->include_ref_pattern->strdup_strings = 1;
+			filter->exclude_ref_config_pattern->strdup_strings = 1;
 		}
 		decoration_loaded = 1;
 		decoration_flags = flags;
@@ -240,6 +244,27 @@ void load_ref_decorations(struct decoration_filter *filter, int flags)
 		refs_head_ref(get_main_ref_store(the_repository),
 			      add_ref_decoration, filter);
 		for_each_commit_graft(add_graft_decoration, filter);
+	}
+}
+
+void load_branch_decorations(void)
+{
+	if (!decoration_loaded) {
+		struct string_list decorate_refs_exclude = STRING_LIST_INIT_NODUP;
+		struct string_list decorate_refs_exclude_config = STRING_LIST_INIT_NODUP;
+		struct string_list decorate_refs_include = STRING_LIST_INIT_NODUP;
+		struct decoration_filter decoration_filter = {
+			.include_ref_pattern = &decorate_refs_include,
+			.exclude_ref_pattern = &decorate_refs_exclude,
+			.exclude_ref_config_pattern = &decorate_refs_exclude_config,
+		};
+
+		string_list_append(&decorate_refs_include, "refs/heads/");
+		load_ref_decorations(&decoration_filter, 0);
+
+		string_list_clear(&decorate_refs_exclude, 0);
+		string_list_clear(&decorate_refs_exclude_config, 0);
+		string_list_clear(&decorate_refs_include, 0);
 	}
 }
 
@@ -314,7 +339,7 @@ static void show_name(struct strbuf *sb, const struct name_decoration *decoratio
  */
 void format_decorations(struct strbuf *sb,
 			const struct commit *commit,
-			int use_color,
+			enum git_colorbool use_color,
 			const struct decoration_options *opts)
 {
 	const struct name_decoration *decoration;
@@ -472,7 +497,7 @@ void log_write_email_headers(struct rev_info *opt, struct commit *commit,
 {
 	struct strbuf headers = STRBUF_INIT;
 	const char *name = oid_to_hex(opt->zero_commit ?
-				      null_oid() : &commit->object.oid);
+				      null_oid(the_hash_algo) : &commit->object.oid);
 
 	*need_8bit_cte_p = 0; /* unknown */
 
@@ -675,7 +700,7 @@ static void show_diff_of_diff(struct rev_info *opt)
 		struct diff_queue_struct dq;
 
 		memcpy(&dq, &diff_queued_diff, sizeof(diff_queued_diff));
-		DIFF_QUEUE_CLEAR(&diff_queued_diff);
+		diff_queue_init(&diff_queued_diff);
 
 		fprintf_ln(opt->diffopt.file, "\n%s", opt->idiff_title);
 		show_interdiff(opt->idiff_oid1, opt->idiff_oid2, 2,
@@ -690,11 +715,13 @@ static void show_diff_of_diff(struct rev_info *opt)
 		struct range_diff_options range_diff_opts = {
 			.creation_factor = opt->creation_factor,
 			.dual_color = 1,
-			.diffopt = &opts
+			.max_memory = RANGE_DIFF_MAX_MEMORY_DEFAULT,
+			.diffopt = &opts,
+			.log_arg = &opt->rdiff_log_arg
 		};
 
 		memcpy(&dq, &diff_queued_diff, sizeof(diff_queued_diff));
-		DIFF_QUEUE_CLEAR(&diff_queued_diff);
+		diff_queue_init(&diff_queued_diff);
 
 		fprintf_ln(opt->diffopt.file, "\n%s", opt->rdiff_title);
 		/*
@@ -922,12 +949,7 @@ int log_tree_diff_flush(struct rev_info *opt)
 			 * diff/diffstat output for readability.
 			 */
 			int pch = DIFF_FORMAT_DIFFSTAT | DIFF_FORMAT_PATCH;
-			if (opt->diffopt.output_prefix) {
-				struct strbuf *msg = NULL;
-				msg = opt->diffopt.output_prefix(&opt->diffopt,
-					opt->diffopt.output_prefix_data);
-				fwrite(msg->buf, msg->len, 1, opt->diffopt.file);
-			}
+			fputs(diff_line_prefix(&opt->diffopt), opt->diffopt.file);
 
 			/*
 			 * We may have shown three-dashes line early
@@ -1015,6 +1037,17 @@ static int do_remerge_diff(struct rev_info *opt,
 	struct strbuf parent1_desc = STRBUF_INIT;
 	struct strbuf parent2_desc = STRBUF_INIT;
 
+	/*
+	 * Lazily prepare a temporary object directory and rotate it
+	 * into the alternative object store list as the primary.
+	 */
+	if (opt->remerge_diff && !opt->remerge_objdir) {
+		opt->remerge_objdir = tmp_objdir_create(the_repository, "remerge-diff");
+		if (!opt->remerge_objdir)
+			return error(_("unable to create temporary object directory"));
+		tmp_objdir_replace_primary_odb(opt->remerge_objdir, 1);
+	}
+
 	/* Setup merge options */
 	init_ui_merge_options(&o, the_repository);
 	o.show_rename_progress = 0;
@@ -1044,17 +1077,14 @@ static int do_remerge_diff(struct rev_info *opt,
 	log_tree_diff_flush(opt);
 
 	/* Cleanup */
-	free_commit_list(bases);
+	commit_list_free(bases);
 	cleanup_additional_headers(&opt->diffopt);
 	strbuf_release(&parent1_desc);
 	strbuf_release(&parent2_desc);
 	merge_finalize(&o, &res);
 
 	/* Clean up the contents of the temporary object directory */
-	if (opt->remerge_objdir)
-		tmp_objdir_discard_objects(opt->remerge_objdir);
-	else
-		BUG("did a remerge diff without remerge_objdir?!?");
+	tmp_objdir_discard_objects(opt->remerge_objdir);
 
 	return !opt->loginfo;
 }

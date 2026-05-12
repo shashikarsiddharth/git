@@ -16,7 +16,7 @@ struct worktree {
 	struct object_id head_oid;
 	int is_detached;
 	int is_bare;
-	int is_current;
+	int is_current;		/* does `path` match `repo->worktree` */
 	int lock_reason_valid; /* private */
 	int prune_reason_valid; /* private */
 };
@@ -31,15 +31,28 @@ struct worktree {
 struct worktree **get_worktrees(void);
 
 /*
+ * Like `get_worktrees`, but does not read HEAD. Skip reading HEAD allows to
+ * get the worktree without worrying about failures pertaining to parsing
+ * the HEAD ref. This is useful in contexts where it is assumed that the
+ * refdb may not be in a consistent state.
+ */
+struct worktree **get_worktrees_without_reading_head(void);
+
+/*
+ * Construct a struct worktree corresponding to repo->gitdir and
+ * repo->worktree.
+ */
+struct worktree *get_worktree_from_repository(struct repository *repo);
+
+/*
  * Returns 1 if linked worktrees exist, 0 otherwise.
  */
 int submodule_uses_worktrees(const char *path);
 
 /*
  * Return git dir of the worktree. Note that the path may be relative.
- * If wt is NULL, git dir of current worktree is returned.
  */
-const char *get_worktree_git_dir(const struct worktree *wt);
+char *get_worktree_git_dir(const struct worktree *wt);
 
 /*
  * Search for the worktree identified unambiguously by `arg` -- typically
@@ -117,8 +130,8 @@ int validate_worktree(const struct worktree *wt,
 /*
  * Update worktrees/xxx/gitdir with the new path.
  */
-void update_worktree_location(struct worktree *wt,
-			      const char *path_);
+void update_worktree_location(struct worktree *wt, const char *path_,
+			      int use_relative_paths);
 
 typedef void (* worktree_repair_fn)(int iserr, const char *path,
 				    const char *msg, void *cb_data);
@@ -129,7 +142,17 @@ typedef void (* worktree_repair_fn)(int iserr, const char *path,
  * function, if non-NULL, is called with the path of the worktree and a
  * description of the repair or error, along with the callback user-data.
  */
-void repair_worktrees(worktree_repair_fn, void *cb_data);
+void repair_worktrees(worktree_repair_fn, void *cb_data, int use_relative_paths);
+
+/*
+ * Repair the linked worktrees after the gitdir has been moved.
+ */
+void repair_worktrees_after_gitdir_move(const char *old_path);
+
+/*
+ * Repair the linked worktree after the gitdir has been moved.
+ */
+void repair_worktree_after_gitdir_move(struct worktree *wt, const char *old_path);
 
 /*
  * Repair administrative files corresponding to the worktree at the given path.
@@ -141,7 +164,8 @@ void repair_worktrees(worktree_repair_fn, void *cb_data);
  * worktree and a description of the repair or error, along with the callback
  * user-data.
  */
-void repair_worktree_at_path(const char *, worktree_repair_fn, void *cb_data);
+void repair_worktree_at_path(const char *, worktree_repair_fn,
+			     void *cb_data, int use_relative_paths);
 
 /*
  * Free up the memory for a worktree.
@@ -172,7 +196,7 @@ int is_shared_symref(const struct worktree *wt,
  * Similar to head_ref() for all HEADs _except_ one from the current
  * worktree, which is covered by head_ref().
  */
-int other_head_refs(each_ref_fn fn, void *cb_data);
+int other_head_refs(refs_for_each_cb fn, void *cb_data);
 
 int is_worktree_being_rebased(const struct worktree *wt, const char *target);
 int is_worktree_being_bisected(const struct worktree *wt, const char *target);
@@ -204,5 +228,18 @@ void strbuf_worktree_ref(const struct worktree *wt,
  * if any of these steps fail.
  */
 int init_worktree_config(struct repository *r);
+
+/**
+ * Write the .git file and gitdir file that links the worktree to the repository.
+ *
+ * The `dotgit` parameter is the path to the worktree's .git file, and `gitdir`
+ * is the path to the repository's `gitdir` file.
+ *
+ * Example
+ *  dotgit: "/path/to/foo/.git"
+ *  gitdir: "/path/to/repo/worktrees/foo/gitdir"
+ */
+void write_worktree_linking_files(const char *dotgit, const char *gitdir,
+				  int use_relative_paths);
 
 #endif

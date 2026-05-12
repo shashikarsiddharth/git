@@ -5,7 +5,6 @@
 
 test_description='mmap sliding window tests'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -13,7 +12,7 @@ test_expect_success 'setup' '
 	for i in a b c
 	do
 	echo $i >$i &&
-	test-tool genrandom "$i" 32768 >>$i &&
+	test-tool genrandom "$i" 32k >>$i &&
 	git update-index --add $i || return 1
 	done &&
 	echo d >d && cat c >>d && git update-index --add d &&

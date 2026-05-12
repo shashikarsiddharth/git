@@ -5,14 +5,7 @@ test_description='Test workflows involving pull request.'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
-
-if ! test_have_prereq PERL
-then
-	skip_all='skipping request-pull tests, perl not available'
-	test_done
-fi
 
 test_expect_success 'setup' '
 

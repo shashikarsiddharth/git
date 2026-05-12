@@ -2,19 +2,12 @@
 #include "hash.h"
 #include "hex.h"
 #include "reftable/system.h"
+#include "reftable/reftable-constants.h"
 #include "reftable/reftable-error.h"
 #include "reftable/reftable-merged.h"
-#include "reftable/reftable-reader.h"
 #include "reftable/reftable-stack.h"
-#include "reftable/reftable-tests.h"
+#include "reftable/reftable-table.h"
 #include "test-tool.h"
-
-int cmd__reftable(int argc, const char **argv)
-{
-	/* test from simple to complex. */
-	stack_test_main(argc, argv);
-	return 0;
-}
 
 static void print_help(void)
 {
@@ -28,6 +21,72 @@ static void print_help(void)
 	       "\n");
 }
 
+static int dump_blocks(const char *tablename)
+{
+	struct reftable_table_iterator ti = { 0 };
+	struct reftable_block_source src = { 0 };
+	struct reftable_table *table = NULL;
+	uint8_t section_type = 0;
+	int err;
+
+	err = reftable_block_source_from_file(&src, tablename);
+	if (err < 0)
+		goto done;
+
+	err = reftable_table_new(&table, &src, tablename);
+	if (err < 0)
+		goto done;
+
+	err = reftable_table_iterator_init(&ti, table);
+	if (err < 0)
+		goto done;
+
+	printf("header:\n");
+	printf("  block_size: %d\n", table->block_size);
+
+	while (1) {
+		const struct reftable_block *block;
+
+		err = reftable_table_iterator_next(&ti, &block);
+		if (err < 0)
+			goto done;
+		if (err > 0)
+			break;
+
+		if (block->block_type != section_type) {
+			const char *section;
+			switch (block->block_type) {
+			case REFTABLE_BLOCK_TYPE_LOG:
+				section = "log";
+				break;
+			case REFTABLE_BLOCK_TYPE_REF:
+				section = "ref";
+				break;
+			case REFTABLE_BLOCK_TYPE_OBJ:
+				section = "obj";
+				break;
+			case REFTABLE_BLOCK_TYPE_INDEX:
+				section = "idx";
+				break;
+			default:
+				err = -1;
+				goto done;
+			}
+
+			section_type = block->block_type;
+			printf("%s:\n", section);
+		}
+
+		printf("  - length: %u\n", block->restart_off);
+		printf("    restarts: %u\n", block->restart_count);
+	}
+
+done:
+	reftable_table_iterator_release(&ti);
+	reftable_table_decref(table);
+	return err;
+}
+
 static int dump_table(struct reftable_merged_table *mt)
 {
 	struct reftable_iterator it = { NULL };
@@ -36,7 +95,10 @@ static int dump_table(struct reftable_merged_table *mt)
 	const struct git_hash_algo *algop;
 	int err;
 
-	reftable_merged_table_init_ref_iterator(mt, &it);
+	err = reftable_merged_table_init_ref_iterator(mt, &it);
+	if (err < 0)
+		return err;
+
 	err = reftable_iterator_seek_ref(&it, "");
 	if (err < 0)
 		return err;
@@ -71,7 +133,10 @@ static int dump_table(struct reftable_merged_table *mt)
 	reftable_iterator_destroy(&it);
 	reftable_ref_record_release(&ref);
 
-	reftable_merged_table_init_log_iterator(mt, &it);
+	err = reftable_merged_table_init_log_iterator(mt, &it);
+	if (err < 0)
+		return err;
+
 	err = reftable_iterator_seek_log(&it, "");
 	if (err < 0)
 		return err;
@@ -128,19 +193,19 @@ static int dump_reftable(const char *tablename)
 {
 	struct reftable_block_source src = { 0 };
 	struct reftable_merged_table *mt = NULL;
-	struct reftable_reader *r = NULL;
+	struct reftable_table *table = NULL;
 	int err;
 
 	err = reftable_block_source_from_file(&src, tablename);
 	if (err < 0)
 		goto done;
 
-	err = reftable_reader_new(&r, &src, tablename);
+	err = reftable_table_new(&table, &src, tablename);
 	if (err < 0)
 		goto done;
 
-	err = reftable_merged_table_new(&mt, &r, 1,
-					reftable_reader_hash_id(r));
+	err = reftable_merged_table_new(&mt, &table, 1,
+					reftable_table_hash_id(table));
 	if (err < 0)
 		goto done;
 
@@ -148,7 +213,7 @@ static int dump_reftable(const char *tablename)
 
 done:
 	reftable_merged_table_free(mt);
-	reftable_reader_decref(r);
+	reftable_table_decref(table);
 	return err;
 }
 
@@ -158,7 +223,7 @@ int cmd__dump_reftable(int argc, const char **argv)
 	int opt_dump_blocks = 0;
 	int opt_dump_table = 0;
 	int opt_dump_stack = 0;
-	uint32_t opt_hash_id = GIT_SHA1_FORMAT_ID;
+	uint32_t opt_hash_id = REFTABLE_HASH_SHA1;
 	const char *arg = NULL, *argv0 = argv[0];
 
 	for (; argc > 1; argv++, argc--)
@@ -169,7 +234,7 @@ int cmd__dump_reftable(int argc, const char **argv)
 		else if (!strcmp("-t", argv[1]))
 			opt_dump_table = 1;
 		else if (!strcmp("-6", argv[1]))
-			opt_hash_id = GIT_SHA256_FORMAT_ID;
+			opt_hash_id = REFTABLE_HASH_SHA256;
 		else if (!strcmp("-s", argv[1]))
 			opt_dump_stack = 1;
 		else if (!strcmp("-?", argv[1]) || !strcmp("-h", argv[1])) {
@@ -186,7 +251,7 @@ int cmd__dump_reftable(int argc, const char **argv)
 	arg = argv[1];
 
 	if (opt_dump_blocks) {
-		err = reftable_reader_print_blocks(arg);
+		err = dump_blocks(arg);
 	} else if (opt_dump_table) {
 		err = dump_reftable(arg);
 	} else if (opt_dump_stack) {

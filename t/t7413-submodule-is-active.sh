@@ -9,7 +9,6 @@ This is a unit test of the submodule.c is_submodule_active() function,
 which is also indirectly tested elsewhere.
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -22,7 +21,7 @@ test_expect_success 'setup' '
 	git -C super submodule add ../sub sub2 &&
 
 	# Remove submodule.<name>.active entries in order to test in an
-	# environment where only URLs are present in the conifg
+	# environment where only URLs are present in the config
 	git -C super config --unset submodule.sub1.active &&
 	git -C super config --unset submodule.sub2.active &&
 
@@ -123,6 +122,21 @@ test_expect_success 'is-active, submodule.active and submodule add' '
 
 	git -C super2 submodule add ../sub mod &&
 	git -C super2 config --get submodule.mod.active
+'
+
+test_expect_success 'submodule add skips redundant active entry' '
+	git init repo &&
+	(
+		cd repo &&
+		git config submodule.active "lib/*" &&
+		git commit --allow-empty -m init &&
+
+		git init ../lib-origin &&
+		git -C ../lib-origin commit --allow-empty -m init &&
+
+		git submodule add ../lib-origin lib/foo &&
+		test_must_fail git config --get submodule.lib/foo.active
+	)
 '
 
 test_done

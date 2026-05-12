@@ -2,7 +2,6 @@
 
 test_description='credential-cache tests'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-credential.sh
 
@@ -124,7 +123,8 @@ test_expect_success SYMLINKS 'use user socket if user directory is a symlink to 
 		rmdir \"\$HOME/dir/\" &&
 		rm \"\$HOME/.git-credential-cache\"
 	" &&
-	mkdir -p -m 700 "$HOME/dir/" &&
+	mkdir -p "$HOME/dir/" &&
+	chmod 700 "$HOME/dir/" &&
 	ln -s "$HOME/dir" "$HOME/.git-credential-cache" &&
 	check approve cache <<-\EOF &&
 	protocol=https

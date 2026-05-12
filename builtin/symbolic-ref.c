@@ -1,5 +1,7 @@
+#define USE_THE_REPOSITORY_VARIABLE
 #include "builtin.h"
 #include "config.h"
+#include "environment.h"
 #include "gettext.h"
 #include "refs.h"
 #include "parse-options.h"
@@ -41,7 +43,10 @@ static int check_symref(const char *HEAD, int quiet, int shorten, int recurse, i
 	return 0;
 }
 
-int cmd_symbolic_ref(int argc, const char **argv, const char *prefix)
+int cmd_symbolic_ref(int argc,
+		     const char **argv,
+		     const char *prefix,
+		     struct repository *repo UNUSED)
 {
 	int quiet = 0, delete = 0, shorten = 0, recurse = 1, ret = 0;
 	const char *msg = NULL;
@@ -55,7 +60,7 @@ int cmd_symbolic_ref(int argc, const char **argv, const char *prefix)
 		OPT_END(),
 	};
 
-	git_config(git_default_config, NULL);
+	repo_config(the_repository, git_default_config, NULL);
 	argc = parse_options(argc, argv, prefix, options,
 			     git_symbolic_ref_usage, 0);
 	if (msg && !*msg)

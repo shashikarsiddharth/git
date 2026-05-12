@@ -33,8 +33,10 @@ test_expect_success 'listing all tags in an empty tree should succeed' '
 '
 
 test_expect_success 'listing all tags in an empty tree should output nothing' '
-	test $(git tag -l | wc -l) -eq 0 &&
-	test $(git tag | wc -l) -eq 0
+	git tag -l >actual &&
+	test_must_be_empty actual &&
+	git tag >actual &&
+	test_must_be_empty actual
 '
 
 test_expect_success 'sort tags, ignore case' '
@@ -89,6 +91,18 @@ test_expect_success 'creating a tag using default HEAD should succeed' '
 	git commit -m Foo &&
 	git tag mytag &&
 	test_must_fail git reflog exists refs/tags/mytag
+'
+
+test_expect_success 'HEAD is forbidden as a tagname' '
+	test_when_finished "git update-ref --no-deref -d refs/tags/HEAD || :" &&
+	test_must_fail git tag HEAD &&
+	test_must_fail git tag -a -m "useless" HEAD
+'
+
+test_expect_success '"git tag" can remove a tag named HEAD' '
+	test_when_finished "git update-ref --no-deref -d refs/tags/HEAD || :" &&
+	git update-ref refs/tags/HEAD HEAD &&
+	git tag -d HEAD
 '
 
 test_expect_success 'creating a tag with --create-reflog should create reflog' '
@@ -166,7 +180,8 @@ test_expect_success 'listing tags using a non-matching pattern should succeed' '
 '
 
 test_expect_success 'listing tags using a non-matching pattern should output nothing' '
-	test $(git tag -l xxx | wc -l) -eq 0
+	git tag -l xxx >actual &&
+	test_must_be_empty actual
 '
 
 # special cases for creating tags:
@@ -176,13 +191,15 @@ test_expect_success 'trying to create a tag with the name of one existing should
 '
 
 test_expect_success 'trying to create a tag with a non-valid name should fail' '
-	test $(git tag -l | wc -l) -eq 1 &&
+	git tag -l >actual &&
+	test_line_count = 1 actual &&
 	test_must_fail git tag "" &&
 	test_must_fail git tag .othertag &&
 	test_must_fail git tag "other tag" &&
 	test_must_fail git tag "othertag^" &&
 	test_must_fail git tag "other~tag" &&
-	test $(git tag -l | wc -l) -eq 1
+	git tag -l >actual &&
+	test_line_count = 1 actual
 '
 
 test_expect_success 'creating a tag using HEAD directly should succeed' '
@@ -1850,7 +1867,7 @@ test_expect_success 'recursive tagging should give advice' '
 	hint: already a tag. If you meant to tag the object that it points to, use:
 	hint:
 	hint: 	git tag -f nested annotated-v4.0^{}
-	hint: Disable this message with "git config advice.nestedTag false"
+	hint: Disable this message with "git config set advice.nestedTag false"
 	EOF
 	git tag -m nested nested annotated-v4.0 2>actual &&
 	test_cmp expect actual
@@ -2281,24 +2298,26 @@ test_expect_success '--contains combined with --no-contains' '
 # don't recurse down to tags for trees or blobs pointed to by *those*
 # commits.
 test_expect_success 'Does --[no-]contains stop at commits? Yes!' '
-	cd no-contains &&
-	blob=$(git rev-parse v0.3:v0.3.t) &&
-	tree=$(git rev-parse v0.3^{tree}) &&
-	git tag tag-blob $blob &&
-	git tag tag-tree $tree &&
-	git tag --contains v0.3 >actual &&
-	cat >expected <<-\EOF &&
-	v0.3
-	v0.4
-	v0.5
-	EOF
-	test_cmp expected actual &&
-	git tag --no-contains v0.3 >actual &&
-	cat >expected <<-\EOF &&
-	v0.1
-	v0.2
-	EOF
-	test_cmp expected actual
+	(
+		cd no-contains &&
+		blob=$(git rev-parse v0.3:v0.3.t) &&
+		tree=$(git rev-parse v0.3^{tree}) &&
+		git tag tag-blob $blob &&
+		git tag tag-tree $tree &&
+		git tag --contains v0.3 >actual &&
+		cat >expected <<-\EOF &&
+		v0.3
+		v0.4
+		v0.5
+		EOF
+		test_cmp expected actual &&
+		git tag --no-contains v0.3 >actual &&
+		cat >expected <<-\EOF &&
+		v0.1
+		v0.2
+		EOF
+		test_cmp expected actual
+	)
 '
 
 test_expect_success 'If tag is created then tag message file is unlinked' '
@@ -2318,6 +2337,26 @@ test_expect_success 'If tag cannot be created then tag message file is not unlin
 	git tag foo/bar &&
 	test_must_fail env GIT_EDITOR=./fakeeditor git tag -a foo &&
 	test_path_exists .git/TAG_EDITMSG
+'
+
+test_expect_success 'annotated tag version sort' '
+	git tag -a -m "sample 1.0" vsample-1.0 &&
+	git tag -a -m "sample 2.0" vsample-2.0 &&
+	git tag -a -m "sample 10.0" vsample-10.0 &&
+	cat >expect <<-EOF &&
+	vsample-1.0
+	vsample-2.0
+	vsample-10.0
+	EOF
+
+	git tag --list --sort=version:tag vsample-\* >actual &&
+	test_cmp expect actual &&
+
+	# Ensure that we also handle this case alright in the case we have the
+	# peeled values cached e.g. via the packed-refs file.
+	git pack-refs --all &&
+	git tag --list --sort=version:tag vsample-\* &&
+	test_cmp expect actual
 '
 
 test_done

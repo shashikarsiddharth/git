@@ -41,8 +41,7 @@ static int compare_commits_by_gen(const void *_a, const void *_b)
 
 static int queue_has_nonstale(struct prio_queue *queue)
 {
-	int i;
-	for (i = 0; i < queue->nr; i++) {
+	for (size_t i = 0; i < queue->nr; i++) {
 		struct commit *commit = queue->array[i].data;
 		if (!(commit->object.flags & STALE))
 			return 1;
@@ -61,6 +60,7 @@ static int paint_down_to_common(struct repository *r,
 	struct prio_queue queue = { compare_commits_by_gen_then_commit_date };
 	int i;
 	timestamp_t last_gen = GENERATION_NUMBER_INFINITY;
+	struct commit_list **tail = result;
 
 	if (!min_generation && !corrected_commit_dates_enabled(r))
 		queue.compare = compare_commits_by_commit_date;
@@ -96,7 +96,7 @@ static int paint_down_to_common(struct repository *r,
 		if (flags == (PARENT1 | PARENT2)) {
 			if (!(commit->object.flags & RESULT)) {
 				commit->object.flags |= RESULT;
-				commit_list_insert_by_date(commit, result);
+				tail = commit_list_append(commit, tail);
 			}
 			/* Mark parents of a found merge stale */
 			flags |= STALE;
@@ -109,7 +109,7 @@ static int paint_down_to_common(struct repository *r,
 				continue;
 			if (repo_parse_commit(r, p)) {
 				clear_prio_queue(&queue);
-				free_commit_list(*result);
+				commit_list_free(*result);
 				*result = NULL;
 				/*
 				 * At this stage, we know that the commit is
@@ -129,6 +129,7 @@ static int paint_down_to_common(struct repository *r,
 	}
 
 	clear_prio_queue(&queue);
+	commit_list_sort_by_date(result);
 	return 0;
 }
 
@@ -137,7 +138,7 @@ static int merge_bases_many(struct repository *r,
 			    struct commit **twos,
 			    struct commit_list **result)
 {
-	struct commit_list *list = NULL;
+	struct commit_list *list = NULL, **tail = result;
 	int i;
 
 	for (i = 0; i < n; i++) {
@@ -165,15 +166,16 @@ static int merge_bases_many(struct repository *r,
 	}
 
 	if (paint_down_to_common(r, one, n, twos, 0, 0, &list)) {
-		free_commit_list(list);
+		commit_list_free(list);
 		return -1;
 	}
 
 	while (list) {
 		struct commit *commit = pop_commit(&list);
 		if (!(commit->object.flags & STALE))
-			commit_list_insert_by_date(commit, result);
+			tail = commit_list_append(commit, tail);
 	}
+	commit_list_sort_by_date(result);
 	return 0;
 }
 
@@ -193,8 +195,8 @@ int get_octopus_merge_bases(struct commit_list *in, struct commit_list **result)
 			struct commit_list *bases = NULL;
 			if (repo_get_merge_bases(the_repository, i->item,
 						 j->item, &bases) < 0) {
-				free_commit_list(bases);
-				free_commit_list(*result);
+				commit_list_free(bases);
+				commit_list_free(*result);
 				*result = NULL;
 				return -1;
 			}
@@ -205,19 +207,20 @@ int get_octopus_merge_bases(struct commit_list *in, struct commit_list **result)
 			for (k = bases; k; k = k->next)
 				end = k;
 		}
-		free_commit_list(*result);
+		commit_list_free(*result);
 		*result = new_commits;
 	}
 	return 0;
 }
 
 static int remove_redundant_no_gen(struct repository *r,
-				   struct commit **array, int cnt)
+				   struct commit **array,
+				   size_t cnt, size_t *dedup_cnt)
 {
 	struct commit **work;
 	unsigned char *redundant;
-	int *filled_index;
-	int i, j, filled;
+	size_t *filled_index;
+	size_t i, j, filled;
 
 	CALLOC_ARRAY(work, cnt);
 	redundant = xcalloc(cnt, 1);
@@ -246,7 +249,7 @@ static int remove_redundant_no_gen(struct repository *r,
 					 work, min_generation, 0, &common)) {
 			clear_commit_marks(array[i], all_flags);
 			clear_commit_marks_many(filled, work, all_flags);
-			free_commit_list(common);
+			commit_list_free(common);
 			free(work);
 			free(redundant);
 			free(filled_index);
@@ -259,7 +262,7 @@ static int remove_redundant_no_gen(struct repository *r,
 				redundant[filled_index[j]] = 1;
 		clear_commit_marks(array[i], all_flags);
 		clear_commit_marks_many(filled, work, all_flags);
-		free_commit_list(common);
+		commit_list_free(common);
 	}
 
 	/* Now collect the result */
@@ -267,20 +270,22 @@ static int remove_redundant_no_gen(struct repository *r,
 	for (i = filled = 0; i < cnt; i++)
 		if (!redundant[i])
 			array[filled++] = work[i];
+	*dedup_cnt = filled;
 	free(work);
 	free(redundant);
 	free(filled_index);
-	return filled;
+	return 0;
 }
 
 static int remove_redundant_with_gen(struct repository *r,
-				     struct commit **array, int cnt)
+				     struct commit **array, size_t cnt,
+				     size_t *dedup_cnt)
 {
-	int i, count_non_stale = 0, count_still_independent = cnt;
+	size_t i, count_non_stale = 0, count_still_independent = cnt;
 	timestamp_t min_generation = GENERATION_NUMBER_INFINITY;
-	struct commit **walk_start, **sorted;
-	size_t walk_start_nr = 0, walk_start_alloc = cnt;
-	int min_gen_pos = 0;
+	struct commit **sorted;
+	struct commit_stack walk_start = COMMIT_STACK_INIT;
+	size_t min_gen_pos = 0;
 
 	/*
 	 * Sort the input by generation number, ascending. This allows
@@ -293,7 +298,7 @@ static int remove_redundant_with_gen(struct repository *r,
 	QSORT(sorted, cnt, compare_commits_by_gen);
 	min_generation = commit_graph_generation(sorted[0]);
 
-	ALLOC_ARRAY(walk_start, walk_start_alloc);
+	commit_stack_grow(&walk_start, cnt);
 
 	/* Mark all parents of the input as STALE */
 	for (i = 0; i < cnt; i++) {
@@ -307,18 +312,17 @@ static int remove_redundant_with_gen(struct repository *r,
 			repo_parse_commit(r, parents->item);
 			if (!(parents->item->object.flags & STALE)) {
 				parents->item->object.flags |= STALE;
-				ALLOC_GROW(walk_start, walk_start_nr + 1, walk_start_alloc);
-				walk_start[walk_start_nr++] = parents->item;
+				commit_stack_push(&walk_start, parents->item);
 			}
 			parents = parents->next;
 		}
 	}
 
-	QSORT(walk_start, walk_start_nr, compare_commits_by_gen);
+	QSORT(walk_start.items, walk_start.nr, compare_commits_by_gen);
 
 	/* remove STALE bit for now to allow walking through parents */
-	for (i = 0; i < walk_start_nr; i++)
-		walk_start[i]->object.flags &= ~STALE;
+	for (i = 0; i < walk_start.nr; i++)
+		walk_start.items[i]->object.flags &= ~STALE;
 
 	/*
 	 * Start walking from the highest generation. Hopefully, it will
@@ -326,12 +330,12 @@ static int remove_redundant_with_gen(struct repository *r,
 	 * terminate early. Otherwise, we will do the same amount of work
 	 * as before.
 	 */
-	for (i = walk_start_nr - 1; i >= 0 && count_still_independent > 1; i--) {
+	for (i = walk_start.nr; i && count_still_independent > 1; i--) {
 		/* push the STALE bits up to min generation */
 		struct commit_list *stack = NULL;
 
-		commit_list_insert(walk_start[i], &stack);
-		walk_start[i]->object.flags |= STALE;
+		commit_list_insert(walk_start.items[i - 1], &stack);
+		walk_start.items[i - 1]->object.flags |= STALE;
 
 		while (stack) {
 			struct commit_list *parents;
@@ -370,7 +374,7 @@ static int remove_redundant_with_gen(struct repository *r,
 			if (!parents)
 				pop_commit(&stack);
 		}
-		free_commit_list(stack);
+		commit_list_free(stack);
 	}
 	free(sorted);
 
@@ -385,13 +389,15 @@ static int remove_redundant_with_gen(struct repository *r,
 	}
 
 	/* clear marks */
-	clear_commit_marks_many(walk_start_nr, walk_start, STALE);
-	free(walk_start);
+	clear_commit_marks_many(walk_start.nr, walk_start.items, STALE);
+	commit_stack_clear(&walk_start);
 
-	return count_non_stale;
+	*dedup_cnt = count_non_stale;
+	return 0;
 }
 
-static int remove_redundant(struct repository *r, struct commit **array, int cnt)
+static int remove_redundant(struct repository *r, struct commit **array,
+			    size_t cnt, size_t *dedup_cnt)
 {
 	/*
 	 * Some commit in the array may be an ancestor of
@@ -401,31 +407,30 @@ static int remove_redundant(struct repository *r, struct commit **array, int cnt
 	 * that number.
 	 */
 	if (generation_numbers_enabled(r)) {
-		int i;
-
 		/*
 		 * If we have a single commit with finite generation
 		 * number, then the _with_gen algorithm is preferred.
 		 */
-		for (i = 0; i < cnt; i++) {
+		for (size_t i = 0; i < cnt; i++) {
 			if (commit_graph_generation(array[i]) < GENERATION_NUMBER_INFINITY)
-				return remove_redundant_with_gen(r, array, cnt);
+				return remove_redundant_with_gen(r, array, cnt, dedup_cnt);
 		}
 	}
 
-	return remove_redundant_no_gen(r, array, cnt);
+	return remove_redundant_no_gen(r, array, cnt, dedup_cnt);
 }
 
 static int get_merge_bases_many_0(struct repository *r,
 				  struct commit *one,
-				  int n,
+				  size_t n,
 				  struct commit **twos,
 				  int cleanup,
 				  struct commit_list **result)
 {
-	struct commit_list *list;
+	struct commit_list *list, **tail = result;
 	struct commit **rslt;
-	int cnt, i;
+	size_t cnt, i;
+	int ret;
 
 	if (merge_bases_many(r, one, n, twos, result) < 0)
 		return -1;
@@ -446,26 +451,27 @@ static int get_merge_bases_many_0(struct repository *r,
 	CALLOC_ARRAY(rslt, cnt);
 	for (list = *result, i = 0; list; list = list->next)
 		rslt[i++] = list->item;
-	free_commit_list(*result);
+	commit_list_free(*result);
 	*result = NULL;
 
 	clear_commit_marks(one, all_flags);
 	clear_commit_marks_many(n, twos, all_flags);
 
-	cnt = remove_redundant(r, rslt, cnt);
-	if (cnt < 0) {
+	ret = remove_redundant(r, rslt, cnt, &cnt);
+	if (ret < 0) {
 		free(rslt);
 		return -1;
 	}
 	for (i = 0; i < cnt; i++)
-		commit_list_insert_by_date(rslt[i], result);
+		tail = commit_list_append(rslt[i], tail);
+	commit_list_sort_by_date(result);
 	free(rslt);
 	return 0;
 }
 
 int repo_get_merge_bases_many(struct repository *r,
 			      struct commit *one,
-			      int n,
+			      size_t n,
 			      struct commit **twos,
 			      struct commit_list **result)
 {
@@ -474,7 +480,7 @@ int repo_get_merge_bases_many(struct repository *r,
 
 int repo_get_merge_bases_many_dirty(struct repository *r,
 				    struct commit *one,
-				    int n,
+				    size_t n,
 				    struct commit **twos,
 				    struct commit_list **result)
 {
@@ -504,7 +510,7 @@ int repo_is_descendant_of(struct repository *r,
 		int result;
 		commit_list_insert(commit, &from_list);
 		result = can_all_from_reach(from_list, with_commit, 0);
-		free_commit_list(from_list);
+		commit_list_free(from_list);
 		return result;
 	} else {
 		while (with_commit) {
@@ -555,7 +561,7 @@ int repo_in_merge_bases_many(struct repository *r, struct commit *commit,
 		ret = 1;
 	clear_commit_marks(commit, all_flags);
 	clear_commit_marks_many(nr_reference, reference, all_flags);
-	free_commit_list(bases);
+	commit_list_free(bases);
 	return ret;
 }
 
@@ -572,7 +578,7 @@ int repo_in_merge_bases(struct repository *r,
 
 	next = commit_list_append(commit, next);
 	res = repo_is_descendant_of(r, reference, list);
-	free_commit_list(list);
+	commit_list_free(list);
 
 	return res;
 }
@@ -582,7 +588,8 @@ struct commit_list *reduce_heads(struct commit_list *heads)
 	struct commit_list *p;
 	struct commit_list *result = NULL, **tail = &result;
 	struct commit **array;
-	int num_head, i;
+	size_t num_head, i;
+	int ret;
 
 	if (!heads)
 		return NULL;
@@ -603,11 +610,13 @@ struct commit_list *reduce_heads(struct commit_list *heads)
 			p->item->object.flags &= ~STALE;
 		}
 	}
-	num_head = remove_redundant(the_repository, array, num_head);
-	if (num_head < 0) {
+
+	ret = remove_redundant(the_repository, array, num_head, &num_head);
+	if (ret < 0) {
 		free(array);
 		return NULL;
 	}
+
 	for (i = 0; i < num_head; i++)
 		tail = &commit_list_insert(array[i], tail)->next;
 	free(array);
@@ -617,7 +626,7 @@ struct commit_list *reduce_heads(struct commit_list *heads)
 void reduce_heads_replace(struct commit_list **heads)
 {
 	struct commit_list *result = reduce_heads(*heads);
-	free_commit_list(*heads);
+	commit_list_free(*heads);
 	*heads = result;
 }
 
@@ -652,7 +661,7 @@ int ref_newer(const struct object_id *new_oid, const struct object_id *old_oid)
 				    new_commit, old_commit_list);
 	if (ret < 0)
 		exit(128);
-	free_commit_list(old_commit_list);
+	commit_list_free(old_commit_list);
 	return ret;
 }
 
@@ -780,12 +789,12 @@ int commit_contains(struct ref_filter *filter, struct commit *commit,
 int can_all_from_reach_with_flag(struct object_array *from,
 				 unsigned int with_flag,
 				 unsigned int assign_flag,
-				 time_t min_commit_date,
+				 timestamp_t min_commit_date,
 				 timestamp_t min_generation)
 {
 	struct commit **list = NULL;
-	int i;
-	int nr_commits;
+	size_t i;
+	size_t nr_commits;
 	int result = 1;
 
 	ALLOC_ARRAY(list, from->nr);
@@ -883,9 +892,9 @@ int can_all_from_reach(struct commit_list *from, struct commit_list *to,
 		       int cutoff_by_min_date)
 {
 	struct object_array from_objs = OBJECT_ARRAY_INIT;
-	time_t min_commit_date = cutoff_by_min_date ? from->item->date : 0;
 	struct commit_list *from_iter = from, *to_iter = to;
 	int result;
+	timestamp_t min_commit_date = cutoff_by_min_date ? from->item->date : 0;
 	timestamp_t min_generation = GENERATION_NUMBER_INFINITY;
 
 	while (from_iter) {
@@ -937,8 +946,8 @@ int can_all_from_reach(struct commit_list *from, struct commit_list *to,
 	return result;
 }
 
-struct commit_list *get_reachable_subset(struct commit **from, int nr_from,
-					 struct commit **to, int nr_to,
+struct commit_list *get_reachable_subset(struct commit **from, size_t nr_from,
+					 struct commit **to, size_t nr_to,
 					 unsigned int reachable_flag)
 {
 	struct commit **item;
@@ -1108,10 +1117,8 @@ void ahead_behind(struct repository *r,
 
 	/* STALE is used here, PARENT2 is used by insert_no_dup(). */
 	repo_clear_commit_marks(r, PARENT2 | STALE);
-	while (prio_queue_peek(&queue)) {
-		struct commit *c = prio_queue_get(&queue);
-		free_bit_array(c);
-	}
+	for (size_t i = 0; i < queue.nr; i++)
+		free_bit_array(queue.array[i].data);
 	clear_bit_arrays(&bit_arrays);
 	clear_prio_queue(&queue);
 }
@@ -1227,7 +1234,7 @@ void tips_reachable_from_bases(struct repository *r,
 done:
 	free(commits);
 	repo_clear_commit_marks(r, SEEN);
-	free_commit_list(stack);
+	commit_list_free(stack);
 }
 
 /*

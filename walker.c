@@ -5,7 +5,7 @@
 #include "hex.h"
 #include "walker.h"
 #include "repository.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "commit.h"
 #include "strbuf.h"
 #include "tree.h"
@@ -14,6 +14,7 @@
 #include "blob.h"
 #include "refs.h"
 #include "progress.h"
+#include "prio-queue.h"
 
 static struct object_id current_commit_oid;
 
@@ -44,7 +45,7 @@ static int process_tree(struct walker *walker, struct tree *tree)
 	struct tree_desc desc;
 	struct name_entry entry;
 
-	if (parse_tree(tree))
+	if (repo_parse_tree(the_repository, tree))
 		return -1;
 
 	init_tree_desc(&desc, &tree->object.oid, tree->buffer, tree->size);
@@ -78,7 +79,7 @@ static int process_tree(struct walker *walker, struct tree *tree)
 #define SEEN		(1U << 1)
 #define TO_SCAN		(1U << 2)
 
-static struct commit_list *complete = NULL;
+static struct prio_queue complete = { compare_commits_by_commit_date };
 
 static int process_commit(struct walker *walker, struct commit *commit)
 {
@@ -87,7 +88,10 @@ static int process_commit(struct walker *walker, struct commit *commit)
 	if (repo_parse_commit(the_repository, commit))
 		return -1;
 
-	while (complete && complete->item->date >= commit->date) {
+	while (complete.nr) {
+		struct commit *item = prio_queue_peek(&complete);
+		if (item->date < commit->date)
+			break;
 		pop_most_recent_commit(&complete, COMPLETE);
 	}
 
@@ -111,7 +115,7 @@ static int process_commit(struct walker *walker, struct commit *commit)
 
 static int process_tag(struct walker *walker, struct tag *tag)
 {
-	if (parse_tag(tag))
+	if (parse_tag(the_repository, tag))
 		return -1;
 	return process(walker, tag->tagged);
 }
@@ -150,14 +154,15 @@ static int process(struct walker *walker, struct object *obj)
 		return 0;
 	obj->flags |= SEEN;
 
-	if (repo_has_object_file(the_repository, &obj->oid)) {
+	if (odb_has_object(the_repository->objects, &obj->oid,
+			   ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR)) {
 		/* We already have it, so we should scan it now. */
 		obj->flags |= TO_SCAN;
 	}
 	else {
 		if (obj->flags & COMPLETE)
 			return 0;
-		walker->prefetch(walker, obj->oid.hash);
+		walker->prefetch(walker, &obj->oid);
 	}
 
 	object_list_insert(obj, process_queue_end);
@@ -172,7 +177,8 @@ static int loop(struct walker *walker)
 	uint64_t nr = 0;
 
 	if (walker->get_progress)
-		progress = start_delayed_progress(_("Fetching objects"), 0);
+		progress = start_delayed_progress(the_repository,
+						  _("Fetching objects"), 0);
 
 	while (process_queue) {
 		struct object *obj = process_queue->item;
@@ -186,7 +192,7 @@ static int loop(struct walker *walker)
 		 * the queue because we needed to fetch it first.
 		 */
 		if (! (obj->flags & TO_SCAN)) {
-			if (walker->fetch(walker, obj->oid.hash)) {
+			if (walker->fetch(walker, &obj->oid)) {
 				stop_progress(&progress);
 				report_missing(obj);
 				return -1;
@@ -220,18 +226,14 @@ static int interpret_target(struct walker *walker, char *target, struct object_i
 	return -1;
 }
 
-static int mark_complete(const char *path UNUSED,
-			const char *referent UNUSED,
-			 const struct object_id *oid,
-			 int flag UNUSED,
-			 void *cb_data UNUSED)
+static int mark_complete(const struct reference *ref, void *cb_data UNUSED)
 {
 	struct commit *commit = lookup_commit_reference_gently(the_repository,
-							       oid, 1);
+							       ref->oid, 1);
 
 	if (commit) {
 		commit->object.flags |= COMPLETE;
-		commit_list_insert(commit, &complete);
+		prio_queue_put(&complete, commit);
 	}
 	return 0;
 }
@@ -290,7 +292,7 @@ int walker_fetch(struct walker *walker, int targets, char **target,
 
 	if (write_ref) {
 		transaction = ref_store_transaction_begin(get_main_ref_store(the_repository),
-							  &err);
+							  0, &err);
 		if (!transaction) {
 			error("%s", err.buf);
 			goto done;
@@ -300,7 +302,6 @@ int walker_fetch(struct walker *walker, int targets, char **target,
 	if (!walker->get_recover) {
 		refs_for_each_ref(get_main_ref_store(the_repository),
 				  mark_complete, NULL);
-		commit_list_sort_by_date(&complete);
 	}
 
 	for (i = 0; i < targets; i++) {

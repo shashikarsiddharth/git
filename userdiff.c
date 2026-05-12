@@ -1,3 +1,6 @@
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "git-compat-util.h"
 #include "config.h"
 #include "userdiff.h"
@@ -56,20 +59,30 @@ PATTERNS("bash",
 	 "("
 	 "("
 	     /* POSIX identifier with mandatory parentheses */
-	     "[a-zA-Z_][a-zA-Z0-9_]*[ \t]*\\([ \t]*\\))"
+	     "([a-zA-Z_][a-zA-Z0-9_]*[ \t]*\\([ \t]*\\))"
 	 "|"
 	     /* Bashism identifier with optional parentheses */
-	     "(function[ \t]+[a-zA-Z_][a-zA-Z0-9_]*(([ \t]*\\([ \t]*\\))|([ \t]+))"
+	     "(function[ \t]+[a-zA-Z_][a-zA-Z0-9_]*(([ \t]*\\([ \t]*\\))|([ \t]+)))"
 	 ")"
-	 /* Optional whitespace */
-	 "[ \t]*"
-	 /* Compound command starting with `{`, `(`, `((` or `[[` */
-	 "(\\{|\\(\\(?|\\[\\[)"
+	 /* Everything after the function header is captured  */
+	 ".*$"
 	 /* End of captured text */
 	 ")",
 	 /* -- */
-	 /* Characters not in the default $IFS value */
-	 "[^ \t]+"),
+	 /* Identifiers: variable and function names */
+	  "[a-zA-Z_][a-zA-Z0-9_]*"
+	 /* Shell variables: $VAR, ${VAR} */
+	  "|\\$[a-zA-Z0-9_]+|\\$\\{"
+	  /*Command list separators and redirection operators  */
+	 "|\\|\\||&&|<<|>>"
+	 /* Operators ending in '=' (comparison + compound assignment) */
+	 "|==|!=|<=|>=|[-+*/%&|^]="
+	 /* Additional parameter expansion operators */
+	 "|:=|:-|:\\+|:\\?|##|%%|\\^\\^|,,"
+	 /* Command-line options (to avoid splitting -option) */
+	 "|[-a-zA-Z0-9_]+"
+	 /* Brackets and grouping symbols */
+	 "|\\(|\\)|\\{|\\}|\\[|\\]"),
 PATTERNS("bibtex",
 	 "(@[a-zA-Z]{1,}[ \t]*\\{{0,1}[ \t]*[^ \t\"@',\\#}{~%]*).*$",
 	 /* -- */
@@ -208,6 +221,10 @@ PATTERNS("html",
 	 "^[ \t]*(<[Hh][1-6]([ \t].*)?>.*)$",
 	 /* -- */
 	 "[^<>= \t]+"),
+PATTERNS("ini",
+	 "^[ \t]*\\[[^]]+\\]",
+	 /* -- */
+	 "[^ \t]+"),
 PATTERNS("java",
 	 "!^[ \t]*(catch|do|for|if|instanceof|new|return|switch|throw|while)\n"
 	 /* Class, enum, interface, and record declarations */
@@ -310,6 +327,10 @@ PATTERNS("python",
 	 "|[-+0-9.e]+[jJlL]?|0[xX]?[0-9a-fA-F]+[lL]?"
 	 "|[-+*/<>%&^|=!]=|//=?|<<=?|>>=?|\\*\\*=?"),
 	 /* -- */
+PATTERNS("r",
+	"^[ \t]*([a-zA-z][a-zA-Z0-9_.]*[ \t]*(<-|=)[ \t]*function.*)$",
+	/* -- */
+	"[^ \t]+"),
 PATTERNS("ruby",
 	 "^[ \t]*((class|module|def)[ \t].*)$",
 	 /* -- */
@@ -323,14 +344,24 @@ PATTERNS("rust",
 	 "|[0-9][0-9_a-fA-Fiosuxz]*(\\.([0-9]*[eE][+-]?)?[0-9_fF]*)?"
 	 "|[-+*\\/<>%&^|=!:]=|<<=?|>>=?|&&|\\|\\||->|=>|\\.{2}=|\\.{3}|::"),
 PATTERNS("scheme",
-	 "^[\t ]*(\\(((define|def(struct|syntax|class|method|rules|record|proto|alias)?)[-*/ \t]|(library|module|struct|class)[*+ \t]).*)$",
 	 /*
-	  * R7RS valid identifiers include any sequence enclosed
-	  * within vertical lines having no backslashes
+	  * An unindented opening parenthesis identifies a top-level
+	  * expression in all Lisp dialects.
 	  */
-	 "\\|([^\\\\]*)\\|"
-	 /* All other words should be delimited by spaces or parentheses */
-	 "|([^][)(}{[ \t])+"),
+	 "^(\\(.*)$\n"
+	 /* For Scheme: a possibly indented left paren followed by a keyword. */
+	 "^[\t ]*(\\(((define|def(struct|syntax|class|method|rules|record|proto|alias)?)[-*/ \t]|(library|module|struct|class)[*+ \t]).*)$\n"
+	 /*
+	  * For all Lisp dialects: a slightly indented line starting with "(def".
+	  */
+	 "^  ?(\\([Dd][Ee][Ff].*)$",
+	 /*
+	  * The union of R7RS and Common Lisp symbol syntax: allows arbitrary
+	  * strings between vertical bars, including any escaped characters.
+	  */
+	 "\\|([^|\\\\]|\\\\.)*\\|"
+	 /* All other words should be delimited by spaces or parentheses. */
+	 "|([^][)(}{ \t])+"),
 PATTERNS("tex", "^(\\\\((sub)*section|chapter|part)\\*{0,1}\\{.*)$",
 	 "\\\\[a-zA-Z@]+|\\\\.|([a-zA-Z0-9]|[^\x01-\x7f])+"),
 { .name = "default", .binary = -1 },

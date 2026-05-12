@@ -5,7 +5,6 @@
 
 test_description='Test git update-ref and basic ref logging'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 Z=$ZERO_OID
@@ -1381,22 +1380,16 @@ test_expect_success 'fails with duplicate ref update via symref' '
 
 test_expect_success ULIMIT_FILE_DESCRIPTORS 'large transaction creating branches does not burst open file limit' '
 (
-	for i in $(test_seq 33)
-	do
-		echo "create refs/heads/$i HEAD" || exit 1
-	done >large_input &&
-	run_with_limited_open_files git update-ref --stdin <large_input &&
+	test_seq -f "create refs/heads/%d HEAD" 33 |
+	run_with_limited_open_files git update-ref --stdin &&
 	git rev-parse --verify -q refs/heads/33
 )
 '
 
 test_expect_success ULIMIT_FILE_DESCRIPTORS 'large transaction deleting branches does not burst open file limit' '
 (
-	for i in $(test_seq 33)
-	do
-		echo "delete refs/heads/$i HEAD" || exit 1
-	done >large_input &&
-	run_with_limited_open_files git update-ref --stdin <large_input &&
+	test_seq -f "delete refs/heads/%d HEAD" 33 |
+	run_with_limited_open_files git update-ref --stdin &&
 	test_must_fail git rev-parse --verify -q refs/heads/33
 )
 '
@@ -1838,10 +1831,10 @@ do
 
 	test_expect_success "stdin $type create dangling symref ref works" '
 		test_when_finished "git symbolic-ref -d refs/heads/symref" &&
-		format_command $type "symref-create refs/heads/symref" "refs/heads/unkown" >stdin &&
+		format_command $type "symref-create refs/heads/symref" "refs/heads/unknown" >stdin &&
 		git update-ref --stdin $type --no-deref <stdin &&
 		git symbolic-ref refs/heads/symref >expect &&
-		echo refs/heads/unkown >actual &&
+		echo refs/heads/unknown >actual &&
 		test_cmp expect actual
 	'
 
@@ -2067,6 +2060,399 @@ do
 		grep "$(git rev-parse $a) $(git rev-parse $a)" actual
 	'
 
+	test_expect_success "stdin $type batch-updates" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit commit &&
+			head=$(git rev-parse HEAD) &&
+
+			format_command $type "update refs/heads/ref1" "$head" "$Z" >stdin &&
+			format_command $type "update refs/heads/ref2" "$head" "$Z" >>stdin &&
+			git update-ref $type --stdin --batch-updates <stdin &&
+			echo $head >expect &&
+			git rev-parse refs/heads/ref1 >actual &&
+			test_cmp expect actual &&
+			git rev-parse refs/heads/ref2 >actual &&
+			test_cmp expect actual
+		)
+	'
+
+	test_expect_success "stdin $type batch-updates with invalid new_oid" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit one &&
+			old_head=$(git rev-parse HEAD) &&
+			test_commit two &&
+			head=$(git rev-parse HEAD) &&
+			git update-ref refs/heads/ref1 $head &&
+			git update-ref refs/heads/ref2 $head &&
+
+			format_command $type "update refs/heads/ref1" "$old_head" "$head" >stdin &&
+			format_command $type "update refs/heads/ref2" "$(test_oid 001)" "$head" >>stdin &&
+			git update-ref $type --stdin --batch-updates <stdin >stdout 2>err &&
+			echo $old_head >expect &&
+			git rev-parse refs/heads/ref1 >actual &&
+			test_cmp expect actual &&
+			echo $head >expect &&
+			git rev-parse refs/heads/ref2 >actual &&
+			test_cmp expect actual &&
+			test_grep "rejected refs/heads/ref2 $(test_oid 001) $head invalid new value provided" stdout &&
+			test_grep "trying to write ref ${SQ}refs/heads/ref2${SQ} with nonexistent object" err
+		)
+	'
+
+	test_expect_success "stdin $type batch-updates with non-commit new_oid" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit one &&
+			old_head=$(git rev-parse HEAD) &&
+			test_commit two &&
+			head=$(git rev-parse HEAD) &&
+			head_tree=$(git rev-parse HEAD^{tree}) &&
+			git update-ref refs/heads/ref1 $head &&
+			git update-ref refs/heads/ref2 $head &&
+
+			format_command $type "update refs/heads/ref1" "$old_head" "$head" >stdin &&
+			format_command $type "update refs/heads/ref2" "$head_tree" "$head" >>stdin &&
+			git update-ref $type --stdin --batch-updates <stdin >stdout 2>err &&
+			echo $old_head >expect &&
+			git rev-parse refs/heads/ref1 >actual &&
+			test_cmp expect actual &&
+			echo $head >expect &&
+			git rev-parse refs/heads/ref2 >actual &&
+			test_cmp expect actual &&
+			test_grep "rejected refs/heads/ref2 $head_tree $head invalid new value provided" stdout &&
+			test_grep "trying to write non-commit object $head_tree to branch ${SQ}refs/heads/ref2${SQ}" err
+		)
+	'
+
+	test_expect_success "stdin $type batch-updates with non-existent ref" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit one &&
+			old_head=$(git rev-parse HEAD) &&
+			test_commit two &&
+			head=$(git rev-parse HEAD) &&
+			git update-ref refs/heads/ref1 $head &&
+
+			format_command $type "update refs/heads/ref1" "$old_head" "$head" >stdin &&
+			format_command $type "update refs/heads/ref2" "$old_head" "$head" >>stdin &&
+			git update-ref $type --stdin --batch-updates <stdin >stdout 2>err &&
+			echo $old_head >expect &&
+			git rev-parse refs/heads/ref1 >actual &&
+			test_cmp expect actual &&
+			test_must_fail git rev-parse refs/heads/ref2 &&
+			test_grep "rejected refs/heads/ref2 $old_head $head reference does not exist" stdout &&
+			test_grep "cannot lock ref ${SQ}refs/heads/ref2${SQ}: unable to resolve reference ${SQ}refs/heads/ref2${SQ}" err
+		)
+	'
+
+	test_expect_success "stdin $type batch-updates with dangling symref" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit one &&
+			old_head=$(git rev-parse HEAD) &&
+			test_commit two &&
+			head=$(git rev-parse HEAD) &&
+			git update-ref refs/heads/ref1 $head &&
+			git symbolic-ref refs/heads/ref2 refs/heads/nonexistent &&
+
+			format_command $type "update refs/heads/ref1" "$old_head" "$head" >stdin &&
+			format_command $type "update refs/heads/ref2" "$old_head" "$head" >>stdin &&
+			git update-ref $type --no-deref --stdin --batch-updates <stdin >stdout 2>err &&
+			echo $old_head >expect &&
+			git rev-parse refs/heads/ref1 >actual &&
+			test_cmp expect actual &&
+			echo $head >expect &&
+			test_must_fail git rev-parse refs/heads/ref2 &&
+			test_grep "rejected refs/heads/ref2 $old_head $head reference does not exist" stdout &&
+			test_grep "cannot lock ref ${SQ}refs/heads/ref2${SQ}: reference is missing but expected $head" err
+		)
+	'
+
+	test_expect_success "stdin $type batch-updates with regular ref as symref" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit one &&
+			old_head=$(git rev-parse HEAD) &&
+			test_commit two &&
+			head=$(git rev-parse HEAD) &&
+			git update-ref refs/heads/ref1 $head &&
+			git update-ref refs/heads/ref2 $head &&
+
+			format_command $type "update refs/heads/ref1" "$old_head" "$head" >stdin &&
+			format_command $type "symref-update refs/heads/ref2" "$old_head" "ref" "refs/heads/nonexistent" >>stdin &&
+			git update-ref $type --no-deref --stdin --batch-updates <stdin >stdout 2>err &&
+			echo $old_head >expect &&
+			git rev-parse refs/heads/ref1 >actual &&
+			test_cmp expect actual &&
+			echo $head >expect &&
+			echo $head >expect &&
+			git rev-parse refs/heads/ref2 >actual &&
+			test_cmp expect actual &&
+			test_grep "rejected refs/heads/ref2 $ZERO_OID $ZERO_OID expected symref but found regular ref" stdout &&
+			test_grep "cannot lock ref ${SQ}refs/heads/ref2${SQ}: expected symref with target ${SQ}refs/heads/nonexistent${SQ}: but is a regular ref" err
+		)
+	'
+
+	test_expect_success "stdin $type batch-updates with invalid old_oid" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit one &&
+			old_head=$(git rev-parse HEAD) &&
+			test_commit two &&
+			head=$(git rev-parse HEAD) &&
+			git update-ref refs/heads/ref1 $head &&
+			git update-ref refs/heads/ref2 $head &&
+
+			format_command $type "update refs/heads/ref1" "$old_head" "$head" >stdin &&
+			format_command $type "update refs/heads/ref2" "$old_head" "$Z" >>stdin &&
+			git update-ref $type --stdin --batch-updates <stdin >stdout 2>err &&
+			echo $old_head >expect &&
+			git rev-parse refs/heads/ref1 >actual &&
+			test_cmp expect actual &&
+			echo $head >expect &&
+			git rev-parse refs/heads/ref2 >actual &&
+			test_cmp expect actual &&
+			test_grep "rejected refs/heads/ref2 $old_head $ZERO_OID reference already exists" stdout &&
+			test_grep "cannot lock ref ${SQ}refs/heads/ref2${SQ}: reference already exists" err
+		)
+	'
+
+	test_expect_success "stdin $type batch-updates with incorrect old oid" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit one &&
+			old_head=$(git rev-parse HEAD) &&
+			test_commit two &&
+			head=$(git rev-parse HEAD) &&
+			git update-ref refs/heads/ref1 $head &&
+			git update-ref refs/heads/ref2 $head &&
+
+			format_command $type "update refs/heads/ref1" "$old_head" "$head" >stdin &&
+			format_command $type "update refs/heads/ref2" "$head" "$old_head" >>stdin &&
+			git update-ref $type --stdin --batch-updates <stdin >stdout 2>err &&
+			echo $old_head >expect &&
+			git rev-parse refs/heads/ref1 >actual &&
+			test_cmp expect actual &&
+			echo $head >expect &&
+			git rev-parse refs/heads/ref2 >actual &&
+			test_cmp expect actual &&
+			test_grep "rejected refs/heads/ref2 $head $old_head incorrect old value provided" stdout &&
+			test_grep "cannot lock ref ${SQ}refs/heads/ref2${SQ}: is at $head but expected $old_head" err
+		)
+	'
+
+	test_expect_success "stdin $type batch-updates refname conflict" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit one &&
+			old_head=$(git rev-parse HEAD) &&
+			test_commit two &&
+			head=$(git rev-parse HEAD) &&
+			git update-ref refs/heads/ref/foo $head &&
+
+			format_command $type "update refs/heads/ref/foo" "$old_head" "$head" >stdin &&
+			format_command $type "update refs/heads/ref" "$old_head" "$ZERO_OID" >>stdin &&
+			git update-ref $type --stdin --batch-updates <stdin >stdout 2>err &&
+			echo $old_head >expect &&
+			git rev-parse refs/heads/ref/foo >actual &&
+			test_cmp expect actual &&
+			test_grep "rejected refs/heads/ref $old_head $ZERO_OID refname conflict" stdout &&
+			test_grep "${SQ}refs/heads/ref/foo${SQ} exists; cannot create ${SQ}refs/heads/ref${SQ}" err
+		)
+	'
+
+	test_expect_success "stdin $type batch-updates refname conflict new ref" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit one &&
+			old_head=$(git rev-parse HEAD) &&
+			test_commit two &&
+			head=$(git rev-parse HEAD) &&
+			git update-ref refs/heads/ref/foo $head &&
+
+			format_command $type "update refs/heads/foo" "$old_head" "$ZERO_OID" >stdin &&
+			format_command $type "update refs/heads/ref" "$old_head" "$ZERO_OID" >>stdin &&
+			git update-ref $type --stdin --batch-updates <stdin >stdout 2>err &&
+			echo $old_head >expect &&
+			git rev-parse refs/heads/foo >actual &&
+			test_cmp expect actual &&
+			test_grep "rejected refs/heads/ref $old_head $ZERO_OID refname conflict" stdout &&
+			test_grep "${SQ}refs/heads/ref/foo${SQ} exists; cannot create ${SQ}refs/heads/ref${SQ}" err
+		)
+	'
+
+	test_expect_success CASE_INSENSITIVE_FS,REFFILES "stdin $type batch-updates existing reference" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit one &&
+			old_head=$(git rev-parse HEAD) &&
+			test_commit two &&
+			head=$(git rev-parse HEAD) &&
+
+			{
+				format_command $type "create refs/heads/foo" "$head" &&
+				format_command $type "create refs/heads/ref" "$old_head" &&
+				format_command $type "create refs/heads/Foo" "$old_head"
+			} >stdin &&
+			git update-ref $type --stdin --batch-updates <stdin >stdout 2>err &&
+
+			echo $head >expect &&
+			git rev-parse refs/heads/foo >actual &&
+			echo $old_head >expect &&
+			git rev-parse refs/heads/ref >actual &&
+			test_cmp expect actual &&
+			test_grep "rejected refs/heads/Foo $old_head $ZERO_OID reference conflict due to case-insensitive filesystem" stdout &&
+			test_grep -e "cannot lock ref ${SQ}refs/heads/Foo${SQ}: Unable to create" -e "Foo.lock" err
+		)
+	'
+
+	test_expect_success CASE_INSENSITIVE_FS "stdin $type batch-updates existing reference" '
+		git init --ref-format=reftable repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit one &&
+			old_head=$(git rev-parse HEAD) &&
+			test_commit two &&
+			head=$(git rev-parse HEAD) &&
+
+			{
+				format_command $type "create refs/heads/foo" "$head" &&
+				format_command $type "create refs/heads/ref" "$old_head" &&
+				format_command $type "create refs/heads/Foo" "$old_head"
+			} >stdin &&
+			git update-ref $type --stdin --batch-updates <stdin >stdout &&
+
+			echo $head >expect &&
+			git rev-parse refs/heads/foo >actual &&
+			echo $old_head >expect &&
+			git rev-parse refs/heads/ref >actual &&
+			test_cmp expect actual &&
+			git rev-parse refs/heads/Foo >actual &&
+			test_cmp expect actual
+		)
+	'
+
+	test_expect_success "stdin $type batch-updates delete incorrect symbolic ref" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit c1 &&
+			head=$(git rev-parse HEAD) &&
+			git symbolic-ref refs/heads/symbolic refs/heads/non-existent &&
+
+			format_command $type "delete refs/heads/symbolic" "$head" >stdin &&
+			git update-ref $type --stdin --batch-updates <stdin >stdout 2>err &&
+			test_grep "rejected refs/heads/non-existent $ZERO_OID $head reference does not exist" stdout &&
+			test_grep "cannot lock ref ${SQ}refs/heads/symbolic${SQ}: unable to resolve reference ${SQ}refs/heads/non-existent${SQ}" err
+		)
+	'
+
+	test_expect_success "stdin $type batch-updates delete with incorrect old_oid" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit c1 &&
+			git branch new-branch &&
+			test_commit c2 &&
+			head=$(git rev-parse HEAD) &&
+
+			format_command $type "delete refs/heads/new-branch" "$head" >stdin &&
+			git update-ref $type --stdin --batch-updates <stdin >stdout 2>err &&
+			test_grep "rejected refs/heads/new-branch $ZERO_OID $head incorrect old value provided" stdout &&
+			test_grep "cannot lock ref ${SQ}refs/heads/new-branch${SQ}: is at $(git rev-parse new-branch) but expected $head" err
+		)
+	'
+
+	test_expect_success "stdin $type batch-updates delete non-existent ref" '
+		git init repo &&
+		test_when_finished "rm -fr repo" &&
+		(
+			cd repo &&
+			test_commit commit &&
+			head=$(git rev-parse HEAD) &&
+
+			format_command $type "delete refs/heads/non-existent" "$head" >stdin &&
+			git update-ref $type --stdin --batch-updates <stdin >stdout 2>err &&
+			test_grep "rejected refs/heads/non-existent $ZERO_OID $head reference does not exist" stdout &&
+			test_grep "cannot lock ref ${SQ}refs/heads/non-existent${SQ}: unable to resolve reference ${SQ}refs/heads/non-existent${SQ}" err
+		)
+	'
 done
+
+test_expect_success 'update-ref should also create reflog for HEAD' '
+	test_commit to-rewind &&
+	git rev-parse HEAD >expect &&
+	head=$(git symbolic-ref HEAD) &&
+	git update-ref --create-reflog "$head" HEAD~ &&
+	git rev-parse HEAD@{1} >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success REFFILES 'empty directories are pruned when aborting a transaction' '
+	test_path_is_missing .git/refs/heads/nested &&
+	git update-ref --stdin <<-EOF &&
+	create refs/heads/nested/something HEAD
+	prepare
+	abort
+	EOF
+	test_path_is_missing .git/refs/heads/nested
+'
+
+test_expect_success REFFILES 'empty directories are pruned when not committing' '
+	test_path_is_missing .git/refs/heads/nested &&
+	git update-ref --stdin <<-EOF &&
+	create refs/heads/nested/something HEAD
+	prepare
+	EOF
+	test_path_is_missing .git/refs/heads/nested
+'
+
+test_expect_success 'dangling symref not overwritten by creation' '
+	test_when_finished "git update-ref -d refs/heads/dangling" &&
+	git symbolic-ref refs/heads/dangling refs/heads/does-not-exist &&
+	test_must_fail git update-ref --no-deref --stdin 2>err <<-\EOF &&
+	create refs/heads/dangling HEAD
+	EOF
+	test_grep "cannot lock.*dangling symref already exists" err &&
+	test_must_fail git rev-parse --verify refs/heads/dangling &&
+	test_must_fail git rev-parse --verify refs/heads/does-not-exist
+'
+
+test_expect_success 'dangling symref overwritten without old oid' '
+	test_when_finished "git update-ref -d refs/heads/dangling" &&
+	git symbolic-ref refs/heads/dangling refs/heads/does-not-exist &&
+	git update-ref --no-deref --stdin <<-\EOF &&
+	update refs/heads/dangling HEAD
+	EOF
+	git rev-parse --verify refs/heads/dangling &&
+	test_must_fail git rev-parse --verify refs/heads/does-not-exist
+'
 
 test_done

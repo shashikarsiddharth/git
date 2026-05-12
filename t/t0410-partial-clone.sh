@@ -11,7 +11,10 @@ test_description='partial clone'
 GIT_TEST_COMMIT_GRAPH=0
 
 delete_object () {
-	rm $1/.git/objects/$(echo $2 | sed -e 's|^..|&/|')
+	local repo="$1"
+	local obj="$2"
+	local path="$repo/.git/objects/$(test_oid_to_path "$obj")" &&
+	rm "$path"
 }
 
 pack_as_from_promisor () {
@@ -240,7 +243,7 @@ test_expect_success 'fetching of missing objects works with ref-in-want enabled'
 	grep "fetch< fetch=.*ref-in-want" trace
 '
 
-test_expect_success 'fetching of missing objects from another promisor remote' '
+test_expect_success 'fetching from another promisor remote' '
 	git clone "file://$(pwd)/server" server2 &&
 	test_commit -C server2 bar &&
 	git -C server2 repack -a -d --write-bitmap-index &&
@@ -263,8 +266,8 @@ test_expect_success 'fetching of missing objects from another promisor remote' '
 	grep "$HASH2" out
 '
 
-test_expect_success 'fetching of missing objects configures a promisor remote' '
-	git clone "file://$(pwd)/server" server3 &&
+test_expect_success 'fetching with --filter configures a promisor remote' '
+	test_create_repo server3 &&
 	test_commit -C server3 baz &&
 	git -C server3 repack -a -d --write-bitmap-index &&
 	HASH3=$(git -C server3 rev-parse baz) &&

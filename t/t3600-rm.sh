@@ -8,7 +8,6 @@ test_description='Test of the various options to git rm.'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 # Setup some files to be removed, some with funny characters
@@ -17,11 +16,6 @@ test_expect_success 'Initialize test directory' '
 	git add -- foo bar baz "space embedded" -q &&
 	git commit -m "add normal files"
 '
-
-if test_have_prereq !FUNNYNAMES
-then
-	say 'Your filesystem does not allow tabs in filenames.'
-fi
 
 test_expect_success FUNNYNAMES 'add files with funny names' '
 	touch -- "tab	embedded" "newline${LF}embedded" &&
@@ -266,7 +260,7 @@ test_expect_success 'choking "git rm" should not let it die with cruft (induce S
 
 test_expect_success !MINGW 'choking "git rm" should not let it die with cruft (induce and check SIGPIPE)' '
 	choke_git_rm_setup &&
-	OUT=$( ((trap "" PIPE && git rm -n "some-file-*"; echo $? 1>&3) | :) 3>&1 ) &&
+	OUT=$( ((trap "" PIPE && git rm -n "some-file-*" && echo 0 1>&3 || echo $? 1>&3) | :) 3>&1 ) &&
 	test_match_signal 13 "$OUT" &&
 	test_path_is_missing .git/index.lock
 '

@@ -2,7 +2,6 @@
 
 test_description='pack-object compression configuration'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success setup '
@@ -11,7 +10,7 @@ test_expect_success setup '
 	# make sure it resulted in a loose object
 	ob=$(sed -e "s/\(..\).*/\1/" object-name) &&
 	ject=$(sed -e "s/..\(.*\)/\1/" object-name) &&
-	test -f .git/objects/$ob/$ject
+	test_path_is_file .git/objects/$ob/$ject
 '
 
 while read expect config

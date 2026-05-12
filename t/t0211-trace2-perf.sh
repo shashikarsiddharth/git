@@ -2,8 +2,13 @@
 
 test_description='test trace2 facility (perf target)'
 
-TEST_PASSES_SANITIZE_LEAK=false
 . ./test-lib.sh
+
+if ! test_have_prereq PERL_TEST_HELPERS
+then
+	skip_all='skipping trace2 tests; Perl not available'
+	test_done
+fi
 
 # Turn off any inherited trace2 settings for this test.
 sane_unset GIT_TRACE2 GIT_TRACE2_PERF GIT_TRACE2_EVENT
@@ -337,7 +342,8 @@ test_expect_success 'expect def_params for query command' '
 # remote-curl.c rather than git.c.  Confirm that we get def_param
 # events from both layers.
 #
-test_expect_success 'expect def_params for remote-curl and _run_dashed_' '
+test_expect_success LIBCURL \
+		'expect def_params for remote-curl and _run_dashed_' '
 	test_when_finished "rm prop.perf actual" &&
 
 	test_config_global "trace2.configParams" "cfg.prop.*" &&
@@ -366,7 +372,8 @@ test_expect_success 'expect def_params for remote-curl and _run_dashed_' '
 # an executable built from http-fetch.c.  Confirm that we get
 # def_param events from both layers.
 #
-test_expect_success 'expect def_params for http-fetch and _run_dashed_' '
+test_expect_success LIBCURL \
+		'expect def_params for http-fetch and _run_dashed_' '
 	test_when_finished "rm prop.perf actual" &&
 
 	test_config_global "trace2.configParams" "cfg.prop.*" &&

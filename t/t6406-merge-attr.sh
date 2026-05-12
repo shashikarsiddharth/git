@@ -8,7 +8,6 @@ test_description='per path merge controlled by merge attribute'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success setup '
@@ -116,6 +115,14 @@ test_expect_success 'retry the merge with longer context' '
 	grep ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>" actual &&
 	grep "================================" actual &&
 	grep "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" actual
+'
+
+test_expect_success 'invalid conflict-marker-size 3a' '
+	cp .gitattributes .gitattributes.bak &&
+	echo "text conflict-marker-size=3a" >>.gitattributes &&
+	test_when_finished "mv .gitattributes.bak .gitattributes" &&
+	git checkout -m text 2>err &&
+	test_grep "warning: invalid marker-size ${SQ}3a${SQ}, expecting an integer" err
 '
 
 test_expect_success 'custom merge backend' '
@@ -252,12 +259,7 @@ test_expect_success 'binary files with union attribute' '
 	printf "two\0" >bin.txt &&
 	git commit -am two &&
 
-	if test "$GIT_TEST_MERGE_ALGORITHM" = ort
-	then
-		test_must_fail git merge bin-main >output
-	else
-		test_must_fail git merge bin-main 2>output
-	fi &&
+	test_must_fail git merge bin-main >output &&
 	grep -i "warning.*cannot merge.*HEAD vs. bin-main" output
 '
 

@@ -1,9 +1,11 @@
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "builtin.h"
 #include "config.h"
+#include "environment.h"
 #include "gettext.h"
 #include "parse-options.h"
 #include "path.h"
-#include "repository.h"
 #include "run-command.h"
 #include "string-list.h"
 
@@ -12,28 +14,30 @@ static const char * const for_each_repo_usage[] = {
 	NULL
 };
 
-static int run_command_on_repo(const char *path, int argc, const char ** argv)
+static int run_command_on_repo(const char *path, const char **argv)
 {
-	int i;
 	struct child_process child = CHILD_PROCESS_INIT;
 	char *abspath = interpolate_path(path, 0);
 
+	sanitize_repo_env(&child.env);
+
 	child.git_cmd = 1;
 	strvec_pushl(&child.args, "-C", abspath, NULL);
-
-	for (i = 0; i < argc; i++)
-		strvec_push(&child.args, argv[i]);
+	strvec_pushv(&child.args, argv);
 
 	free(abspath);
 
 	return run_command(&child);
 }
 
-int cmd_for_each_repo(int argc, const char **argv, const char *prefix)
+int cmd_for_each_repo(int argc,
+		      const char **argv,
+		      const char *prefix,
+		      struct repository *repo UNUSED)
 {
 	static const char *config_key = NULL;
 	int keep_going = 0;
-	int i, result = 0;
+	int result = 0;
 	const struct string_list *values;
 	int err;
 
@@ -58,8 +62,8 @@ int cmd_for_each_repo(int argc, const char **argv, const char *prefix)
 	else if (err)
 		return 0;
 
-	for (i = 0; i < values->nr; i++) {
-		int ret = run_command_on_repo(values->items[i].string, argc, argv);
+	for (size_t i = 0; i < values->nr; i++) {
+		int ret = run_command_on_repo(values->items[i].string, argv);
 		if (ret) {
 			if (!keep_going)
 					return ret;

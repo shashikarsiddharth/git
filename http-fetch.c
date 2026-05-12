@@ -2,6 +2,7 @@
 
 #include "git-compat-util.h"
 #include "config.h"
+#include "environment.h"
 #include "gettext.h"
 #include "hex.h"
 #include "http.h"
@@ -106,6 +107,7 @@ int cmd_main(int argc, const char **argv)
 	int nongit;
 	struct object_id packfile_hash;
 	struct strvec index_pack_args = STRVEC_INIT;
+	int ret;
 
 	setup_git_directory_gently(&nongit);
 
@@ -149,7 +151,7 @@ int cmd_main(int argc, const char **argv)
 
 	trace2_cmd_name("http-fetch");
 
-	git_config(git_default_config, NULL);
+	repo_config(the_repository, git_default_config, NULL);
 
 	if (packfile) {
 		if (!index_pack_args.nr)
@@ -157,8 +159,8 @@ int cmd_main(int argc, const char **argv)
 
 		fetch_single_packfile(&packfile_hash, argv[arg],
 				      index_pack_args.v);
-
-		return 0;
+		ret = 0;
+		goto out;
 	}
 
 	if (index_pack_args.nr)
@@ -170,7 +172,12 @@ int cmd_main(int argc, const char **argv)
 		commit_id = (char **) &argv[arg++];
 		commits = 1;
 	}
-	return fetch_using_walker(argv[arg], get_verbosely, get_recover,
-				  commits, commit_id, write_ref,
-				  commits_on_stdin);
+
+	ret = fetch_using_walker(argv[arg], get_verbosely, get_recover,
+				 commits, commit_id, write_ref,
+				 commits_on_stdin);
+
+out:
+	strvec_clear(&index_pack_args);
+	return ret;
 }

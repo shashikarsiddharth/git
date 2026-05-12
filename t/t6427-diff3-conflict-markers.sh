@@ -5,7 +5,6 @@ test_description='recursive merge diff3 style conflict markers'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 # Setup:
@@ -208,7 +207,7 @@ test_expect_success 'rebase --apply describes fake ancestor base' '
 		cd rebase &&
 		git rebase --abort &&
 		test_must_fail git -c merge.conflictstyle=diff3 rebase --apply main &&
-		grep "||||||| constructed merge base" file
+		grep "||||||| constructed fake ancestor" file
 	)
 '
 

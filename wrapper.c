@@ -1,6 +1,9 @@
 /*
  * Various trivial helper wrappers around standard functions
  */
+
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "git-compat-util.h"
 #include "abspath.h"
 #include "parse.h"
@@ -112,7 +115,7 @@ void *xmemdupz(const void *data, size_t len)
 
 char *xstrndup(const char *str, size_t len)
 {
-	char *p = memchr(str, '\0', len);
+	const char *p = memchr(str, '\0', len);
 	return xmemdupz(str, p ? p - str : len);
 }
 
@@ -418,24 +421,7 @@ FILE *fopen_or_warn(const char *path, const char *mode)
 
 int xmkstemp(char *filename_template)
 {
-	int fd;
-	char origtemplate[PATH_MAX];
-	strlcpy(origtemplate, filename_template, sizeof(origtemplate));
-
-	fd = mkstemp(filename_template);
-	if (fd < 0) {
-		int saved_errno = errno;
-		const char *nonrelative_template;
-
-		if (strlen(filename_template) != strlen(origtemplate))
-			filename_template = origtemplate;
-
-		nonrelative_template = absolute_path(filename_template);
-		errno = saved_errno;
-		die_errno("Unable to create temporary file '%s'",
-			nonrelative_template);
-	}
-	return fd;
+	return xmkstemp_mode(filename_template, 0600);
 }
 
 /* Adapted from libiberty's mkstemp.c. */
@@ -443,7 +429,11 @@ int xmkstemp(char *filename_template)
 #undef TMP_MAX
 #define TMP_MAX 16384
 
-int git_mkstemps_mode(char *pattern, int suffix_len, int mode)
+/*
+ * Returns -1 on error, 0 if it created a directory, or an open file
+ * descriptor to the created regular file.
+ */
+static int git_mkdstemps_mode(char *pattern, int suffix_len, int mode, bool dir)
 {
 	static const char letters[] =
 		"abcdefghijklmnopqrstuvwxyz"
@@ -476,7 +466,7 @@ int git_mkstemps_mode(char *pattern, int suffix_len, int mode)
 	for (count = 0; count < TMP_MAX; ++count) {
 		int i;
 		uint64_t v;
-		if (csprng_bytes(&v, sizeof(v)) < 0)
+		if (csprng_bytes(&v, sizeof(v), 0) < 0)
 			return error_errno("unable to get random bytes for temporary file");
 
 		/* Fill in the random bits. */
@@ -485,7 +475,10 @@ int git_mkstemps_mode(char *pattern, int suffix_len, int mode)
 			v /= num_letters;
 		}
 
-		fd = open(pattern, O_CREAT | O_EXCL | O_RDWR, mode);
+		if (dir)
+			fd = mkdir(pattern, mode);
+		else
+			fd = open(pattern, O_CREAT | O_EXCL | O_RDWR, mode);
 		if (fd >= 0)
 			return fd;
 		/*
@@ -498,6 +491,16 @@ int git_mkstemps_mode(char *pattern, int suffix_len, int mode)
 	/* We return the null string if we can't find a unique file name.  */
 	pattern[0] = '\0';
 	return -1;
+}
+
+char *git_mkdtemp(char *pattern)
+{
+	return git_mkdstemps_mode(pattern, 0, 0700, true) ? NULL : pattern;
+}
+
+int git_mkstemps_mode(char *pattern, int suffix_len, int mode)
+{
+	return git_mkdstemps_mode(pattern, suffix_len, mode, false);
 }
 
 int git_mkstemp_mode(char *pattern, int mode)
@@ -718,6 +721,19 @@ int xgethostname(char *buf, size_t len)
 	return ret;
 }
 
+int is_missing_file(const char *filename)
+{
+	struct stat st;
+
+	if (stat(filename, &st) < 0) {
+		if (errno == ENOENT)
+			return 1;
+		die_errno(_("could not stat %s"), filename);
+	}
+
+	return 0;
+}
+
 int is_empty_or_missing_file(const char *filename)
 {
 	struct stat st;
@@ -734,7 +750,26 @@ int is_empty_or_missing_file(const char *filename)
 int open_nofollow(const char *path, int flags)
 {
 #ifdef O_NOFOLLOW
-	return open(path, flags | O_NOFOLLOW);
+	int ret = open(path, flags | O_NOFOLLOW);
+	/*
+	 * NetBSD sets errno to EFTYPE when path is a symlink. The only other
+	 * time this errno occurs when O_REGULAR is used. Since we don't use
+	 * it anywhere we can avoid an lstat here. FreeBSD does the same with
+	 * EMLINK.
+	 */
+# ifdef __NetBSD__
+#  define SYMLINK_ERRNO EFTYPE
+# elif defined(__FreeBSD__)
+#  define SYMLINK_ERRNO EMLINK
+# endif
+# if SYMLINK_ERRNO
+	if (ret < 0 && errno == SYMLINK_ERRNO) {
+		errno = ELOOP;
+		return -1;
+	}
+#  undef SYMLINK_ERRNO
+# endif
+	return ret;
 #else
 	struct stat st;
 	if (lstat(path, &st) < 0)
@@ -747,7 +782,7 @@ int open_nofollow(const char *path, int flags)
 #endif
 }
 
-int csprng_bytes(void *buf, size_t len)
+int csprng_bytes(void *buf, size_t len, MAYBE_UNUSED unsigned flags)
 {
 #if defined(HAVE_ARC4RANDOM) || defined(HAVE_ARC4RANDOM_LIBBSD)
 	/* This function never returns an error. */
@@ -782,14 +817,18 @@ int csprng_bytes(void *buf, size_t len)
 		return -1;
 	return 0;
 #elif defined(HAVE_OPENSSL_CSPRNG)
-	int res = RAND_bytes(buf, len);
-	if (res == 1)
+	switch (RAND_pseudo_bytes(buf, len)) {
+	case 1:
 		return 0;
-	if (res == -1)
-		errno = ENOTSUP;
-	else
+	case 0:
+		if (flags & CSPRNG_BYTES_INSECURE)
+			return 0;
 		errno = EIO;
-	return -1;
+		return -1;
+	default:
+		errno = ENOTSUP;
+		return -1;
+	}
 #else
 	ssize_t res;
 	char *p = buf;
@@ -813,12 +852,60 @@ int csprng_bytes(void *buf, size_t len)
 #endif
 }
 
-uint32_t git_rand(void)
+uint32_t git_rand(unsigned flags)
 {
 	uint32_t result;
 
-	if (csprng_bytes(&result, sizeof(result)) < 0)
+	if (csprng_bytes(&result, sizeof(result), flags) < 0)
 		die(_("unable to get random bytes"));
 
 	return result;
+}
+
+static void mmap_limit_check(size_t length)
+{
+	static size_t limit = 0;
+	if (!limit) {
+		limit = git_env_ulong("GIT_MMAP_LIMIT", 0);
+		if (!limit)
+			limit = SIZE_MAX;
+	}
+	if (length > limit)
+		die(_("attempting to mmap %"PRIuMAX" over limit %"PRIuMAX),
+		    (uintmax_t)length, (uintmax_t)limit);
+}
+
+void *xmmap_gently(void *start, size_t length,
+		  int prot, int flags, int fd, off_t offset)
+{
+	void *ret;
+
+	mmap_limit_check(length);
+	ret = mmap(start, length, prot, flags, fd, offset);
+	if (ret == MAP_FAILED && !length)
+		ret = NULL;
+	return ret;
+}
+
+const char *mmap_os_err(void)
+{
+	static const char blank[] = "";
+#if defined(__linux__)
+	if (errno == ENOMEM) {
+		/* this continues an existing error message: */
+		static const char enomem[] =
+", check sys.vm.max_map_count and/or RLIMIT_DATA";
+		return enomem;
+	}
+#endif /* OS-specific bits */
+	return blank;
+}
+
+void *xmmap(void *start, size_t length,
+	int prot, int flags, int fd, off_t offset)
+{
+	void *ret = xmmap_gently(start, length, prot, flags, fd, offset);
+	if (ret == MAP_FAILED)
+		die_errno(_("mmap failed%s"), mmap_os_err());
+	return ret;
 }

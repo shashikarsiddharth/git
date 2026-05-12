@@ -1,4 +1,4 @@
-#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
 #include "gettext.h"
@@ -6,25 +6,24 @@
 #include "object.h"
 #include "replace-object.h"
 #include "object-file.h"
-#include "object-store.h"
+#include "odb/streaming.h"
 #include "blob.h"
 #include "statinfo.h"
 #include "tree.h"
 #include "commit.h"
 #include "tag.h"
 #include "alloc.h"
-#include "packfile.h"
 #include "commit-graph.h"
-#include "loose.h"
 
-unsigned int get_max_object_index(void)
+unsigned int get_max_object_index(const struct repository *repo)
 {
-	return the_repository->parsed_objects->obj_hash_size;
+	return repo->parsed_objects->obj_hash_size;
 }
 
-struct object *get_indexed_object(unsigned int idx)
+struct object *get_indexed_object(const struct repository *repo,
+				       unsigned int idx)
 {
-	return the_repository->parsed_objects->obj_hash[idx];
+	return repo->parsed_objects->obj_hash[idx];
 }
 
 static const char *object_type_strings[] = {
@@ -209,27 +208,54 @@ struct object *lookup_object_by_type(struct repository *r,
 	}
 }
 
-enum peel_status peel_object(struct repository *r,
-			     const struct object_id *name,
-			     struct object_id *oid)
+enum peel_status peel_object_ext(struct repository *r,
+				 const struct object_id *name,
+				 struct object_id *oid,
+				 unsigned flags,
+				 enum object_type *typep)
 {
 	struct object *o = lookup_unknown_object(r, name);
 
 	if (o->type == OBJ_NONE) {
-		int type = oid_object_info(r, name, NULL);
+		int type = odb_read_object_info(r->objects, name, NULL);
 		if (type < 0 || !object_as_type(o, type, 0))
 			return PEEL_INVALID;
 	}
 
-	if (o->type != OBJ_TAG)
+	if (o->type != OBJ_TAG) {
+		*typep = o->type;
 		return PEEL_NON_TAG;
+	}
 
-	o = deref_tag_noverify(r, o);
+	while (o && o->type == OBJ_TAG) {
+		o = parse_object(r, &o->oid);
+		if (o && o->type == OBJ_TAG && ((struct tag *)o)->tagged) {
+			o = ((struct tag *)o)->tagged;
+
+			if (flags & PEEL_OBJECT_VERIFY_TAGGED_OBJECT_TYPE) {
+				int type = odb_read_object_info(r->objects, &o->oid, NULL);
+				if (type < 0 || !object_as_type(o, type, 0))
+					return PEEL_INVALID;
+			}
+		} else {
+			o = NULL;
+		}
+	}
 	if (!o)
 		return PEEL_INVALID;
 
 	oidcpy(oid, &o->oid);
+	*typep = o->type;
 	return PEEL_PEELED;
+}
+
+enum peel_status peel_object(struct repository *r,
+			     const struct object_id *name,
+			     struct object_id *oid,
+			     unsigned flags)
+{
+	enum object_type dummy;
+	return peel_object_ext(r, name, oid, flags, &dummy);
 }
 
 struct object *parse_object_buffer(struct repository *r, const struct object_id *oid, enum object_type type, unsigned long size, void *buffer, int *eaten_p)
@@ -282,10 +308,11 @@ struct object *parse_object_buffer(struct repository *r, const struct object_id 
 	return obj;
 }
 
-struct object *parse_object_or_die(const struct object_id *oid,
+struct object *parse_object_or_die(struct repository *repo,
+				   const struct object_id *oid,
 				   const char *name)
 {
-	struct object *o = parse_object(the_repository, oid);
+	struct object *o = parse_object(repo, oid);
 	if (o)
 		return o;
 
@@ -315,11 +342,23 @@ struct object *parse_object_with_flags(struct repository *r,
 			return &commit->object;
 	}
 
-	if ((!obj || obj->type == OBJ_BLOB) &&
-	    oid_object_info(r, oid, NULL) == OBJ_BLOB) {
-		if (!skip_hash && stream_object_signature(r, repl) < 0) {
-			error(_("hash mismatch %s"), oid_to_hex(oid));
-			return NULL;
+	if ((!obj || obj->type == OBJ_NONE || obj->type == OBJ_BLOB) &&
+	    odb_read_object_info(r->objects, oid, NULL) == OBJ_BLOB) {
+		if (!skip_hash) {
+			struct odb_read_stream *stream = odb_read_stream_open(r->objects, oid, NULL);
+
+			if (!stream) {
+				error(_("unable to open object stream for %s"), oid_to_hex(oid));
+				return NULL;
+			}
+
+			if (stream_object_signature(r, stream, repl) < 0) {
+				error(_("hash mismatch %s"), oid_to_hex(oid));
+				odb_read_stream_close(stream);
+				return NULL;
+			}
+
+			odb_read_stream_close(stream);
 		}
 		parse_blob_buffer(lookup_blob(r, oid));
 		return lookup_object(r, oid);
@@ -331,12 +370,12 @@ struct object *parse_object_with_flags(struct repository *r,
 	 * have the on-disk object with the correct type.
 	 */
 	if (skip_hash && discard_tree &&
-	    (!obj || obj->type == OBJ_TREE) &&
-	    oid_object_info(r, oid, NULL) == OBJ_TREE) {
+	    (!obj || obj->type == OBJ_NONE || obj->type == OBJ_TREE) &&
+	    odb_read_object_info(r->objects, oid, NULL) == OBJ_TREE) {
 		return &lookup_tree(r, oid)->object;
 	}
 
-	buffer = repo_read_object_file(r, oid, &type, &size);
+	buffer = odb_read_object(r->objects, oid, &type, &size);
 	if (buffer) {
 		if (!skip_hash &&
 		    check_object_signature(r, repl, buffer, size, type) < 0) {
@@ -490,45 +529,12 @@ void object_array_clear(struct object_array *array)
 	array->nr = array->alloc = 0;
 }
 
-/*
- * Return true if array already contains an entry.
- */
-static int contains_object(struct object_array *array,
-			   const struct object *item, const char *name)
-{
-	unsigned nr = array->nr, i;
-	struct object_array_entry *object = array->objects;
-
-	for (i = 0; i < nr; i++, object++)
-		if (item == object->item && !strcmp(object->name, name))
-			return 1;
-	return 0;
-}
-
-void object_array_remove_duplicates(struct object_array *array)
-{
-	unsigned nr = array->nr, src;
-	struct object_array_entry *objects = array->objects;
-
-	array->nr = 0;
-	for (src = 0; src < nr; src++) {
-		if (!contains_object(array, objects[src].item,
-				     objects[src].name)) {
-			if (src != array->nr)
-				objects[array->nr] = objects[src];
-			array->nr++;
-		} else {
-			object_array_release_entry(&objects[src]);
-		}
-	}
-}
-
-void clear_object_flags(unsigned flags)
+void clear_object_flags(struct repository *repo, unsigned flags)
 {
 	int i;
 
-	for (i=0; i < the_repository->parsed_objects->obj_hash_size; i++) {
-		struct object *obj = the_repository->parsed_objects->obj_hash[i];
+	for (i = 0; i < repo->parsed_objects->obj_hash_size; i++) {
+		struct object *obj = repo->parsed_objects->obj_hash[i];
 		if (obj)
 			obj->flags &= ~flags;
 	}
@@ -545,17 +551,17 @@ void repo_clear_commit_marks(struct repository *r, unsigned int flags)
 	}
 }
 
-struct parsed_object_pool *parsed_object_pool_new(void)
+struct parsed_object_pool *parsed_object_pool_new(struct repository *repo)
 {
 	struct parsed_object_pool *o = xmalloc(sizeof(*o));
 	memset(o, 0, sizeof(*o));
 
-	o->blob_state = allocate_alloc_state();
-	o->tree_state = allocate_alloc_state();
-	o->commit_state = allocate_alloc_state();
-	o->tag_state = allocate_alloc_state();
-	o->object_state = allocate_alloc_state();
-
+	o->repo = repo;
+	o->blob_state = alloc_state_alloc();
+	o->tree_state = alloc_state_alloc();
+	o->commit_state = alloc_state_alloc();
+	o->tag_state = alloc_state_alloc();
+	o->object_state = alloc_state_alloc();
 	o->is_shallow = -1;
 	CALLOC_ARRAY(o->shallow_stat, 1);
 
@@ -564,68 +570,14 @@ struct parsed_object_pool *parsed_object_pool_new(void)
 	return o;
 }
 
-struct raw_object_store *raw_object_store_new(void)
+void parsed_object_pool_reset_commit_grafts(struct parsed_object_pool *o)
 {
-	struct raw_object_store *o = xmalloc(sizeof(*o));
-
-	memset(o, 0, sizeof(*o));
-	INIT_LIST_HEAD(&o->packed_git_mru);
-	hashmap_init(&o->pack_map, pack_map_entry_cmp, NULL, 0);
-	pthread_mutex_init(&o->replace_mutex, NULL);
-	return o;
-}
-
-void free_object_directory(struct object_directory *odb)
-{
-	free(odb->path);
-	odb_clear_loose_cache(odb);
-	loose_object_map_clear(&odb->loose_map);
-	free(odb);
-}
-
-static void free_object_directories(struct raw_object_store *o)
-{
-	while (o->odb) {
-		struct object_directory *next;
-
-		next = o->odb->next;
-		free_object_directory(o->odb);
-		o->odb = next;
+	for (int i = 0; i < o->grafts_nr; i++) {
+		unparse_commit(o->repo, &o->grafts[i]->oid);
+		free(o->grafts[i]);
 	}
-	kh_destroy_odb_path_map(o->odb_by_path);
-	o->odb_by_path = NULL;
-}
-
-void raw_object_store_clear(struct raw_object_store *o)
-{
-	FREE_AND_NULL(o->alternate_db);
-
-	oidmap_free(o->replace_map, 1);
-	FREE_AND_NULL(o->replace_map);
-	pthread_mutex_destroy(&o->replace_mutex);
-
-	free_commit_graph(o->commit_graph);
-	o->commit_graph = NULL;
-	o->commit_graph_attempted = 0;
-
-	free_object_directories(o);
-	o->odb_tail = NULL;
-	o->loaded_alternates = 0;
-
-	INIT_LIST_HEAD(&o->packed_git_mru);
-	close_object_store(o);
-
-	/*
-	 * `close_object_store()` only closes the packfiles, but doesn't free
-	 * them. We thus have to do this manually.
-	 */
-	for (struct packed_git *p = o->packed_git, *next; p; p = next) {
-		next = p->next;
-		free(p);
-	}
-	o->packed_git = NULL;
-
-	hashmap_clear(&o->pack_map);
+	o->grafts_nr = 0;
+	o->commit_graft_prepared = 0;
 }
 
 void parsed_object_pool_clear(struct parsed_object_pool *o)
@@ -659,16 +611,12 @@ void parsed_object_pool_clear(struct parsed_object_pool *o)
 	free_commit_buffer_slab(o->buffer_slab);
 	o->buffer_slab = NULL;
 
-	clear_alloc_state(o->blob_state);
-	clear_alloc_state(o->tree_state);
-	clear_alloc_state(o->commit_state);
-	clear_alloc_state(o->tag_state);
-	clear_alloc_state(o->object_state);
+	parsed_object_pool_reset_commit_grafts(o);
+	alloc_state_free_and_null(&o->blob_state);
+	alloc_state_free_and_null(&o->tree_state);
+	alloc_state_free_and_null(&o->commit_state);
+	alloc_state_free_and_null(&o->tag_state);
+	alloc_state_free_and_null(&o->object_state);
 	stat_validity_clear(o->shallow_stat);
-	FREE_AND_NULL(o->blob_state);
-	FREE_AND_NULL(o->tree_state);
-	FREE_AND_NULL(o->commit_state);
-	FREE_AND_NULL(o->tag_state);
-	FREE_AND_NULL(o->object_state);
 	FREE_AND_NULL(o->shallow_stat);
 }

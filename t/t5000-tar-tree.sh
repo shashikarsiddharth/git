@@ -25,7 +25,6 @@ commit id embedding:
 '
 
 TEST_CREATE_REPO_NO_TEMPLATE=1
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 SUBSTFORMAT=%H%n
@@ -137,6 +136,8 @@ test_expect_success 'end-of-options is correctly eaten' '
 
 test_expect_success 'populate workdir' '
 	mkdir a &&
+	echo "a files_named_a" >.gitattributes &&
+	git add .gitattributes &&
 	echo simple textfile >a/a &&
 	ten=0123456789 &&
 	hundred="$ten$ten$ten$ten$ten$ten$ten$ten$ten$ten" &&
@@ -450,6 +451,16 @@ test_expect_success 'allow pathspecs that resolve to the current directory' '
 	test_cmp expect actual
 '
 
+test_expect_success 'attr pathspec in bare repo' '
+	test_expect_code 0 git --git-dir=bare.git archive -v HEAD \
+		":(attr:files_named_a)" >/dev/null 2>actual &&
+	cat >expect <<-\EOF &&
+	a/
+	a/a
+	EOF
+	test_cmp expect actual
+'
+
 # Pull the size and date of each entry in a tarfile using the system tar.
 #
 # We'll pull out only the year from the date; that avoids any question of
@@ -492,8 +503,8 @@ test_expect_success LONG_IS_64BIT 'set up repository with huge blob' '
 # would generate the whole 64GB).
 test_expect_success LONG_IS_64BIT 'generate tar with huge size' '
 	{
-		git archive HEAD
-		echo $? >exit-code
+		{ ret=0 && git archive HEAD || ret=$?; } &&
+		echo "$ret" >exit-code
 	} | test_copy_bytes 4096 >huge.tar &&
 	echo 141 >expect &&
 	test_cmp expect exit-code

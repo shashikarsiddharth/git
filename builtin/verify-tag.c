@@ -7,6 +7,7 @@
  */
 #include "builtin.h"
 #include "config.h"
+#include "environment.h"
 #include "gettext.h"
 #include "tag.h"
 #include "object-name.h"
@@ -19,7 +20,10 @@ static const char * const verify_tag_usage[] = {
 		NULL
 };
 
-int cmd_verify_tag(int argc, const char **argv, const char *prefix)
+int cmd_verify_tag(int argc,
+		   const char **argv,
+		   const char *prefix,
+		   struct repository *repo)
 {
 	int i = 1, verbose = 0, had_error = 0;
 	unsigned flags = 0;
@@ -31,7 +35,7 @@ int cmd_verify_tag(int argc, const char **argv, const char *prefix)
 		OPT_END()
 	};
 
-	git_config(git_default_config, NULL);
+	repo_config(repo, git_default_config, NULL);
 
 	argc = parse_options(argc, argv, prefix, verify_tag_options,
 			     verify_tag_usage, PARSE_OPT_KEEP_ARGV0);
@@ -52,18 +56,18 @@ int cmd_verify_tag(int argc, const char **argv, const char *prefix)
 		struct object_id oid;
 		const char *name = argv[i++];
 
-		if (repo_get_oid(the_repository, name, &oid)) {
+		if (repo_get_oid(repo, name, &oid)) {
 			had_error = !!error("tag '%s' not found.", name);
 			continue;
 		}
 
-		if (gpg_verify_tag(&oid, name, flags)) {
+		if (gpg_verify_tag(repo, &oid, name, flags)) {
 			had_error = 1;
 			continue;
 		}
 
 		if (format.format)
-			pretty_print_ref(name, &oid, &format);
+			pretty_print_ref(name, &oid, NULL, &format);
 	}
 	return had_error;
 }

@@ -3,11 +3,15 @@
  *
  * Copyright (c) 2006 Junio C Hamano
  */
+
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "builtin.h"
 #include "abspath.h"
+#include "environment.h"
 #include "gettext.h"
 #include "hex.h"
-#include "repository.h"
 #include "config.h"
 #include "tag.h"
 #include "tree-walk.h"
@@ -23,7 +27,7 @@
 #include "submodule-config.h"
 #include "object-file.h"
 #include "object-name.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "packfile.h"
 #include "pager.h"
 #include "path.h"
@@ -450,7 +454,7 @@ static int grep_submodule(struct grep_opt *opt,
 		return 0;
 
 	subrepo = xmalloc(sizeof(*subrepo));
-	if (repo_submodule_init(subrepo, superproject, path, null_oid())) {
+	if (repo_submodule_init(subrepo, superproject, path, null_oid(opt->repo->hash_algo))) {
 		free(subrepo);
 		return 0;
 	}
@@ -459,7 +463,7 @@ static int grep_submodule(struct grep_opt *opt,
 
 	/*
 	 * NEEDSWORK: repo_read_gitmodules() might call
-	 * add_to_alternates_memory() via config_from_gitmodules(). This
+	 * odb_add_to_alternates_memory() via config_from_gitmodules(). This
 	 * operation causes a race condition with concurrent object readings
 	 * performed by the worker threads. That's why we need obj_read_lock()
 	 * here. It should be removed once it's no longer necessary to add the
@@ -478,7 +482,7 @@ static int grep_submodule(struct grep_opt *opt,
 	 *	"forget" the sparse-index feature switch. As a result, the index
 	 *	of these submodules are expanded unexpectedly.
 	 *
-	 * 2. "core_apply_sparse_checkout"
+	 * 2. "config_values_private_.apply_sparse_checkout"
 	 *	When running `grep` in the superproject, this setting is
 	 *	populated using the superproject's configs. However, once
 	 *	initialized, this config is globally accessible and is read by
@@ -502,7 +506,8 @@ static int grep_submodule(struct grep_opt *opt,
 	 * lazily registered as alternates when needed (and except in an
 	 * unexpected code interaction, it won't be needed).
 	 */
-	add_submodule_odb_by_path(subrepo->objects->odb->path);
+	odb_add_submodule_source_by_path(the_repository->objects,
+					 subrepo->objects->sources->path);
 	obj_read_unlock();
 
 	memcpy(&subopt, opt, sizeof(subopt));
@@ -516,11 +521,9 @@ static int grep_submodule(struct grep_opt *opt,
 		struct strbuf base = STRBUF_INIT;
 
 		obj_read_lock();
-		object_type = oid_object_info(subrepo, oid, NULL);
+		object_type = odb_read_object_info(subrepo->objects, oid, NULL);
 		obj_read_unlock();
-		data = read_object_with_reference(subrepo,
-						  oid, OBJ_TREE,
-						  &size, NULL);
+		data = odb_read_object_peeled(subrepo->objects, oid, OBJ_TREE, &size, NULL);
 		if (!data)
 			die(_("unable to read tree (%s)"), oid_to_hex(oid));
 
@@ -569,8 +572,8 @@ static int grep_cache(struct grep_opt *opt,
 			void *data;
 			unsigned long size;
 
-			data = repo_read_object_file(the_repository, &ce->oid,
-						     &type, &size);
+			data = odb_read_object(the_repository->objects, &ce->oid,
+					       &type, &size);
 			if (!data)
 				die(_("unable to read tree %s"), oid_to_hex(&ce->oid));
 			init_tree_desc(&tree, &ce->oid, data, size);
@@ -662,8 +665,8 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 			void *data;
 			unsigned long size;
 
-			data = repo_read_object_file(the_repository,
-						     &entry.oid, &type, &size);
+			data = odb_read_object(the_repository->objects,
+					       &entry.oid, &type, &size);
 			if (!data)
 				die(_("unable to read tree (%s)"),
 				    oid_to_hex(&entry.oid));
@@ -701,9 +704,8 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		struct strbuf base;
 		int hit, len;
 
-		data = read_object_with_reference(opt->repo,
-						  &obj->oid, OBJ_TREE,
-						  &size, NULL);
+		data = odb_read_object_peeled(opt->repo->objects, &obj->oid,
+					      OBJ_TREE, &size, NULL);
 		if (!data)
 			die(_("unable to read tree (%s)"), oid_to_hex(&obj->oid));
 
@@ -888,7 +890,10 @@ static int pattern_callback(const struct option *opt, const char *arg,
 	return 0;
 }
 
-int cmd_grep(int argc, const char **argv, const char *prefix)
+int cmd_grep(int argc,
+	     const char **argv,
+	     const char *prefix,
+	     struct repository *repo UNUSED)
 {
 	int hit = 0;
 	int cached = 0, untracked = 0, opt_exclude = -1;
@@ -903,6 +908,7 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 	int dummy;
 	int use_index = 1;
 	int allow_revs;
+	int ret;
 
 	struct option options[] = {
 		OPT_BOOL(0, "cached", &cached,
@@ -976,9 +982,9 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 		OPT_CALLBACK('C', "context", &opt, N_("n"),
 			N_("show <n> context lines before and after matches"),
 			context_callback),
-		OPT_INTEGER('B', "before-context", &opt.pre_context,
+		OPT_UNSIGNED('B', "before-context", &opt.pre_context,
 			N_("show <n> context lines before matches")),
-		OPT_INTEGER('A', "after-context", &opt.post_context,
+		OPT_UNSIGNED('A', "after-context", &opt.post_context,
 			N_("show <n> context lines after matches")),
 		OPT_INTEGER(0, "threads", &num_threads,
 			N_("use <n> worker threads")),
@@ -1010,10 +1016,16 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 		OPT_BOOL(0, "all-match", &opt.all_match,
 			N_("show only matches from files that match all patterns")),
 		OPT_GROUP(""),
-		{ OPTION_STRING, 'O', "open-files-in-pager", &show_in_pager,
-			N_("pager"), N_("show matching files in the pager"),
-			PARSE_OPT_OPTARG | PARSE_OPT_NOCOMPLETE,
-			NULL, (intptr_t)default_pager },
+		{
+			.type = OPTION_STRING,
+			.short_name = 'O',
+			.long_name = "open-files-in-pager",
+			.value = &show_in_pager,
+			.argh = N_("pager"),
+			.help = N_("show matching files in the pager"),
+			.flags = PARSE_OPT_OPTARG | PARSE_OPT_NOCOMPLETE,
+			.defval = (intptr_t)default_pager,
+		},
 		OPT_BOOL_F(0, "ext-grep", &external_grep_allowed__ignored,
 			   N_("allow calling of grep(1) (ignored by this build)"),
 			   PARSE_OPT_NOCOMPLETE),
@@ -1024,7 +1036,7 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 	grep_prefix = prefix;
 
 	grep_init(&opt, the_repository);
-	git_config(grep_cmd_config, &opt);
+	repo_config(the_repository, grep_cmd_config, &opt);
 
 	/*
 	 * If there is no -- then the paths must exist in the working
@@ -1047,7 +1059,7 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 
 	if (use_index && !startup_info->have_repository) {
 		int fallback = 0;
-		git_config_get_bool("grep.fallbacktonoindex", &fallback);
+		repo_config_get_bool(the_repository, "grep.fallbacktonoindex", &fallback);
 		if (fallback)
 			use_index = 0;
 		else
@@ -1077,9 +1089,9 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 	}
 
 	if (show_in_pager == default_pager)
-		show_in_pager = git_pager(1);
+		show_in_pager = git_pager(the_repository, 1);
 	if (show_in_pager) {
-		opt.color = 0;
+		opt.color = GIT_COLOR_NEVER;
 		opt.name_only = 1;
 		opt.null_following_name = 1;
 		opt.output_priv = &path_list;
@@ -1133,10 +1145,11 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 					 &oid, &oc)) {
 			if (seen_dashdash)
 				die(_("unable to resolve revision: %s"), arg);
+			object_context_release(&oc);
 			break;
 		}
 
-		object = parse_object_or_die(&oid, arg);
+		object = parse_object_or_die(the_repository, &oid, arg);
 		if (!seen_dashdash)
 			verify_non_filename(prefix, arg);
 		add_object_array_with_path(object, arg, &list, oc.mode, oc.path);
@@ -1168,8 +1181,10 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 	 * Optimize out the case where the amount of matches is limited to zero.
 	 * We do this to keep results consistent with GNU grep(1).
 	 */
-	if (opt.max_count == 0)
-		return 1;
+	if (opt.max_count == 0) {
+		ret = 1;
+		goto out;
+	}
 
 	if (show_in_pager) {
 		if (num_threads > 1)
@@ -1198,8 +1213,16 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 		 */
 		if (recurse_submodules)
 			repo_read_gitmodules(the_repository, 1);
-		if (startup_info->have_repository)
-			(void)get_packed_git(the_repository);
+
+		if (startup_info->have_repository) {
+			struct odb_source *source;
+
+			odb_prepare_alternates(the_repository->objects);
+			for (source = the_repository->objects->sources; source; source = source->next) {
+				struct odb_source_files *files = odb_source_files_downcast(source);
+				packfile_store_prepare(files->packed);
+			}
+		}
 
 		start_threads(&opt);
 	} else {
@@ -1236,7 +1259,7 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 	}
 
 	if (!show_in_pager && !opt.status_only)
-		setup_pager();
+		setup_pager(the_repository);
 
 	die_for_incompatible_opt3(!use_index, "--no-index",
 				  untracked, "--untracked",
@@ -1263,10 +1286,14 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 		hit |= wait_all();
 	if (hit && show_in_pager)
 		run_pager(&opt, prefix);
+
+	ret = !hit;
+
+out:
 	clear_pathspec(&pathspec);
 	string_list_clear(&path_list, 0);
 	free_grep_patterns(&opt);
 	object_array_clear(&list);
 	free_repos();
-	return !hit;
+	return ret;
 }

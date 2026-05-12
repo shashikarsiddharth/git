@@ -21,7 +21,6 @@ Initial setup:
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-rebase.sh
 . "$TEST_DIRECTORY"/lib-log-graph.sh
@@ -87,7 +86,7 @@ test_expect_success 'create completely different structure' '
 	test_config sequence.editor \""$PWD"/replace-editor.sh\" &&
 	test_tick &&
 	git rebase -i -r A main &&
-	test_cmp_graph <<-\EOF
+	test_cmp_graph <<-\EOF &&
 	*   Merge the topic branch '\''onebranch'\''
 	|\
 	| * D
@@ -100,6 +99,15 @@ test_expect_success 'create completely different structure' '
 	|/
 	* A
 	EOF
+
+	head="$(git show-ref --verify -s --abbrev HEAD)" &&
+	cat >expect <<-EOF &&
+	$head HEAD@{0}: rebase (finish): returning to refs/heads/main
+	$head HEAD@{1}: rebase (merge): Merge the topic branch ${SQ}onebranch${SQ}
+	EOF
+
+	git reflog -n2 HEAD >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'generate correct todo list' '
@@ -107,20 +115,20 @@ test_expect_success 'generate correct todo list' '
 	label onto
 
 	reset onto
-	pick $b B
-	label E
+	pick $b # B
+	label first
 
 	reset onto
-	pick $c C
+	pick $c # C
 	label branch-point
-	pick $f F
-	pick $g G
-	label H
+	pick $f # F
+	pick $g # G
+	label second
 
 	reset branch-point # C
-	pick $d D
-	merge -C $e E # E
-	merge -C $h H # H
+	pick $d # D
+	merge -C $e first # E
+	merge -C $h second # H
 
 	EOF
 
@@ -462,11 +470,11 @@ test_expect_success 'A root commit can be a cousin, treat it that way' '
 '
 
 test_expect_success 'labels that are object IDs are rewritten' '
-	git checkout -b third B &&
+	git checkout --detach B &&
 	test_commit I &&
 	third=$(git rev-parse HEAD) &&
 	git checkout -b labels main &&
-	git merge --no-commit third &&
+	git merge --no-commit $third &&
 	test_tick &&
 	git commit -m "Merge commit '\''$third'\'' into labels" &&
 	echo noop >script-from-scratch &&
@@ -499,9 +507,11 @@ test_expect_success 'octopus merges' '
 	git rebase -i --force-rebase -r HEAD^^ &&
 	test "Hank" = "$(git show -s --format=%an HEAD)" &&
 	test "$before" != $(git rev-parse HEAD) &&
-	test_cmp_graph HEAD^^.. <<-\EOF
+	# NOTE: do not quote this heredoc, Dash 0.5.13 has a bug with heredocs
+	# that contain multibyte chars.
+	test_cmp_graph HEAD^^.. <<-EOF
 	*-.   Tüntenfüsch
-	|\ \
+	|\\ \\
 	| | * three
 	| * | two
 	| |/
@@ -609,6 +619,26 @@ test_expect_success 'truncate label names' '
 	grep "label 0123456789-我$" out &&
 	git -c rebase.maxLabelLength=13 rebase --rebase-merges -x "cp \"$done\" out" --root &&
 	grep "label 0123456789-$" out
+'
+
+test_expect_success 'reword fast-forwarded empty merge commit' '
+	oid="$(git commit-tree -m "D1" -p A D^{tree})" &&
+	oid="$(git commit-tree -m "empty merge" -p D -p $oid D^{tree})" &&
+
+	write_script sequence-editor.sh <<-\EOF &&
+	sed /^merge/s/-C/-c/ "$1" >"$1.tmp"
+	mv "$1.tmp" "$1"
+	EOF
+
+	(
+		test_set_sequence_editor "$(pwd)/sequence-editor.sh" &&
+		GIT_EDITOR="echo edited >>" git rebase -i -r D $oid
+	) &&
+	test_commit_message HEAD <<-\EOF
+	empty merge
+
+	edited
+	EOF
 '
 
 test_done

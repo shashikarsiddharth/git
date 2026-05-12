@@ -130,7 +130,7 @@ test_expect_success 'subtest: a failing TODO test' '
 '
 
 test_expect_success 'subtest: a passing TODO test' '
-	write_and_run_sub_test_lib_test passing-todo <<-\EOF &&
+	write_and_run_sub_test_lib_test_err passing-todo <<-\EOF &&
 	test_expect_failure "pretend we have fixed a known breakage" "true"
 	test_done
 	EOF
@@ -142,7 +142,7 @@ test_expect_success 'subtest: a passing TODO test' '
 '
 
 test_expect_success 'subtest: 2 TODO tests, one passin' '
-	write_and_run_sub_test_lib_test partially-passing-todos <<-\EOF &&
+	write_and_run_sub_test_lib_test_err partially-passing-todos <<-\EOF &&
 	test_expect_failure "pretend we have a known breakage" "false"
 	test_expect_success "pretend we have a passing test" "true"
 	test_expect_failure "pretend we have fixed another known breakage" "true"
@@ -219,41 +219,44 @@ test_expect_success 'subtest: --verbose option' '
 	test_expect_success "failing test" false
 	test_done
 	EOF
-	mv t1234-verbose/out t1234-verbose/out+ &&
-	grep -v "^Initialized empty" t1234-verbose/out+ >t1234-verbose/out &&
-	check_sub_test_lib_test t1234-verbose <<-\EOF
-	> expecting success of 1234.1 '\''passing test'\'': true
+	mv t1234-verbose/err t1234-verbose/err+ &&
+	grep -v "^Initialized empty" t1234-verbose/err+ >t1234-verbose/err &&
+	check_sub_test_lib_test_err t1234-verbose \
+		<<-\EOF_OUT 3<<-\EOF_ERR
 	> ok 1 - passing test
+	> ok 2 - test with output
+	> not ok 3 - failing test
+	> #	false
+	> # failed 1 among 3 test(s)
+	> 1..3
+	EOF_OUT
+	> expecting success of 1234.1 '\''passing test'\'': true
 	> Z
 	> expecting success of 1234.2 '\''test with output'\'': echo foo
 	> foo
-	> ok 2 - test with output
 	> Z
 	> expecting success of 1234.3 '\''failing test'\'': false
-	> not ok 3 - failing test
-	> #	false
 	> Z
-	> # failed 1 among 3 test(s)
-	> 1..3
-	EOF
+	EOF_ERR
 '
 
 test_expect_success 'subtest: --verbose-only option' '
 	run_sub_test_lib_test_err \
 		t1234-verbose \
 		--verbose-only=2 &&
-	check_sub_test_lib_test t1234-verbose <<-\EOF
+	check_sub_test_lib_test_err t1234-verbose <<-\EOF_OUT 3<<-\EOF_ERR
 	> ok 1 - passing test
-	> Z
-	> expecting success of 1234.2 '\''test with output'\'': echo foo
-	> foo
 	> ok 2 - test with output
-	> Z
 	> not ok 3 - failing test
 	> #	false
 	> # failed 1 among 3 test(s)
 	> 1..3
-	EOF
+	EOF_OUT
+	> Z
+	> expecting success of 1234.2 '\''test with output'\'': echo foo
+	> foo
+	> Z
+	EOF_ERR
 '
 
 test_expect_success 'subtest: skip one with GIT_SKIP_TESTS' '
@@ -684,7 +687,7 @@ test_expect_success 'subtest: tests respect lazy prerequisites' '
 	write_and_run_sub_test_lib_test lazy-prereqs <<-\EOF &&
 
 	test_lazy_prereq LAZY_TRUE true
-	test_expect_success LAZY_TRUE "lazy prereq is satisifed" "true"
+	test_expect_success LAZY_TRUE "lazy prereq is satisfied" "true"
 	test_expect_success !LAZY_TRUE "negative lazy prereq" "false"
 
 	test_lazy_prereq LAZY_FALSE false
@@ -695,7 +698,7 @@ test_expect_success 'subtest: tests respect lazy prerequisites' '
 	EOF
 
 	check_sub_test_lib_test lazy-prereqs <<-\EOF
-	ok 1 - lazy prereq is satisifed
+	ok 1 - lazy prereq is satisfied
 	ok 2 # skip negative lazy prereq (missing !LAZY_TRUE)
 	ok 3 # skip lazy prereq not satisfied (missing LAZY_FALSE)
 	ok 4 - negative false prereq

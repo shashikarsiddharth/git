@@ -6,7 +6,6 @@ This test runs git ls-files with various unusual or malformed
 command-line arguments.
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'ls-files in empty repository' '
@@ -33,6 +32,13 @@ test_expect_success 'ls-files -h in corrupt repository' '
 		test_expect_code 129 git ls-files -h >usage 2>&1
 	) &&
 	test_grep "[Uu]sage: git ls-files " broken/usage
+'
+
+test_expect_success 'ls-files does not crash with -h' '
+	test_expect_code 129 git ls-files -h >usage &&
+	test_grep "[Uu]sage: git ls-files " usage &&
+	test_expect_code 129 nongit git ls-files -h >usage &&
+	test_grep "[Uu]sage: git ls-files " usage
 '
 
 test_expect_success SYMLINKS 'ls-files with absolute paths to symlinks' '

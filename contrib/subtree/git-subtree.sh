@@ -26,12 +26,12 @@ then
 fi
 
 OPTS_SPEC="\
-git subtree add   --prefix=<prefix> <commit>
-git subtree add   --prefix=<prefix> <repository> <ref>
-git subtree merge --prefix=<prefix> <commit>
-git subtree split --prefix=<prefix> [<commit>]
-git subtree pull  --prefix=<prefix> <repository> <ref>
-git subtree push  --prefix=<prefix> <repository> <refspec>
+git subtree add   --prefix=<prefix> [-S[=<key-id>]] <commit>
+git subtree add   --prefix=<prefix> [-S[=<key-id>]] <repository> <ref>
+git subtree merge --prefix=<prefix> [-S[=<key-id>]] <commit>
+git subtree split --prefix=<prefix> [-S[=<key-id>]] [<commit>]
+git subtree pull  --prefix=<prefix> [-S[=<key-id>]] <repository> <ref>
+git subtree push  --prefix=<prefix> [-S[=<key-id>]] <repository> <refspec>
 --
 h,help!       show the help
 q,quiet!      quiet
@@ -46,6 +46,7 @@ rejoin        merge the new branch back into HEAD
  options for 'add' and 'merge' (also: 'pull', 'split --rejoin', and 'push --rejoin')
 squash        merge subtree changes as a single commit
 m,message!=   use the given message as the commit message for the merge commit
+S,gpg-sign?key-id   GPG-sign commits. The keyid argument is optional and defaults to the committer identity
 "
 
 indent=0
@@ -115,7 +116,7 @@ main () {
 	then
 		set -- -h
 	fi
-	set_args="$(echo "$OPTS_SPEC" | git rev-parse --parseopt -- "$@" || echo exit $?)"
+	set_args="$(echo "$OPTS_SPEC" | git rev-parse --parseopt --stuck-long -- "$@" || echo exit $?)"
 	eval "$set_args"
 	. git-sh-setup
 	require_work_tree
@@ -131,9 +132,6 @@ main () {
 		opt="$1"
 		shift
 		case "$opt" in
-			--annotate|-b|-P|-m|--onto)
-				shift
-				;;
 			--rejoin)
 				arg_split_rejoin=1
 				;;
@@ -171,48 +169,44 @@ main () {
 	arg_split_annotate=
 	arg_addmerge_squash=
 	arg_addmerge_message=
+    arg_gpg_sign=
 	while test $# -gt 0
 	do
 		opt="$1"
 		shift
 
 		case "$opt" in
-		-q)
+		--quiet)
 			arg_quiet=1
 			;;
-		-d)
+		--debug)
 			arg_debug=1
 			;;
-		--annotate)
+		--annotate=*)
 			test -n "$allow_split" || die_incompatible_opt "$opt" "$arg_command"
-			arg_split_annotate="$1"
-			shift
+			arg_split_annotate="${opt#*=}"
 			;;
 		--no-annotate)
 			test -n "$allow_split" || die_incompatible_opt "$opt" "$arg_command"
 			arg_split_annotate=
 			;;
-		-b)
+		--branch=*)
 			test -n "$allow_split" || die_incompatible_opt "$opt" "$arg_command"
-			arg_split_branch="$1"
-			shift
+			arg_split_branch="${opt#*=}"
 			;;
-		-P)
-			arg_prefix="${1%/}"
-			shift
+		--prefix=*)
+			arg_prefix="${opt#*=}"
 			;;
-		-m)
+		--message=*)
 			test -n "$allow_addmerge" || die_incompatible_opt "$opt" "$arg_command"
-			arg_addmerge_message="$1"
-			shift
+			arg_addmerge_message="${opt#*=}"
 			;;
 		--no-prefix)
 			arg_prefix=
 			;;
-		--onto)
+		--onto=*)
 			test -n "$allow_split" || die_incompatible_opt "$opt" "$arg_command"
-			arg_split_onto="$1"
-			shift
+			arg_split_onto="${opt#*=}"
 			;;
 		--no-onto)
 			test -n "$allow_split" || die_incompatible_opt "$opt" "$arg_command"
@@ -240,6 +234,9 @@ main () {
 			test -n "$allow_addmerge" || die_incompatible_opt "$opt" "$arg_command"
 			arg_addmerge_squash=
 			;;
+	--gpg-sign=* | --gpg-sign | --no-gpg-sign)
+	    arg_gpg_sign="$opt"
+	    ;;
 		--)
 			break
 			;;
@@ -260,6 +257,9 @@ main () {
 		test -e "$arg_prefix" &&
 			die "fatal: prefix '$arg_prefix' already exists."
 		;;
+	split)
+		# checked later against the commit, not the working tree
+		;;
 	*)
 		test -e "$arg_prefix" ||
 			die "fatal: '$arg_prefix' does not exist; use 'git subtree add'"
@@ -272,6 +272,7 @@ main () {
 	debug "quiet: {$arg_quiet}"
 	debug "dir: {$dir}"
 	debug "opts: {$*}"
+    debug "gpg-sign: {$arg_gpg_sign}"
 	debug
 
 	"cmd_$arg_command" "$@"
@@ -537,7 +538,7 @@ copy_commit () {
 			printf "%s" "$arg_split_annotate"
 			cat
 		) |
-		git commit-tree "$2" $3  # reads the rest of stdin
+		git commit-tree $arg_gpg_sign "$2" $3  # reads the rest of stdin
 	) || die "fatal: can't copy commit $1"
 }
 
@@ -683,10 +684,10 @@ new_squash_commit () {
 	if test -n "$old"
 	then
 		squash_msg "$dir" "$oldsub" "$newsub" |
-		git commit-tree "$tree" -p "$old" || exit $?
+		git commit-tree $arg_gpg_sign "$tree" -p "$old" || exit $?
 	else
 		squash_msg "$dir" "" "$newsub" |
-		git commit-tree "$tree" || exit $?
+		git commit-tree $arg_gpg_sign "$tree" || exit $?
 	fi
 }
 
@@ -785,22 +786,6 @@ ensure_valid_ref_format () {
 	assert test $# = 1
 	git check-ref-format "refs/heads/$1" ||
 		die "fatal: '$1' does not look like a ref"
-}
-
-# Usage: check if a commit from another subtree should be
-# ignored from processing for splits
-should_ignore_subtree_split_commit () {
-	assert test $# = 1
-	local rev="$1"
-	if test -n "$(git log -1 --grep="git-subtree-dir:" $rev)"
-	then
-		if test -z "$(git log -1 --grep="git-subtree-mainline:" $rev)" &&
-			test -z "$(git log -1 --grep="git-subtree-dir: $arg_prefix$" $rev)"
-		then
-			return 0
-		fi
-	fi
-	return 1
 }
 
 # Usage: process_split_commit REV PARENTS
@@ -925,11 +910,11 @@ cmd_add_commit () {
 	then
 		rev=$(new_squash_commit "" "" "$rev") || exit $?
 		commit=$(add_squashed_msg "$rev" "$dir" |
-			git commit-tree "$tree" $headp -p "$rev") || exit $?
+			git commit-tree $arg_gpg_sign "$tree" $headp -p "$rev") || exit $?
 	else
 		revp=$(peel_committish "$rev") || exit $?
 		commit=$(add_msg "$dir" $headrev "$rev" |
-			git commit-tree "$tree" $headp -p "$revp") || exit $?
+			git commit-tree $arg_gpg_sign "$tree" $headp -p "$revp") || exit $?
 	fi
 	git reset "$commit" || exit $?
 
@@ -946,7 +931,13 @@ cmd_split () {
 		rev=$(git rev-parse -q --verify "$1^{commit}") ||
 			die "fatal: '$1' does not refer to a commit"
 	else
-		die "fatal: you must provide exactly one revision, and optionnally a repository.  Got: '$*'"
+		die "fatal: you must provide exactly one revision, and optionally a repository.  Got: '$*'"
+	fi
+
+	# Now validate prefix against the commit, not the working tree
+	if ! git cat-file -e "$rev:$dir" 2>/dev/null
+	then
+		die "fatal: '$dir' does not exist; use 'git subtree add'"
 	fi
 	repository=""
 	if test "$#" = 2
@@ -988,19 +979,7 @@ cmd_split () {
 	eval "$grl" |
 	while read rev parents
 	do
-		if should_ignore_subtree_split_commit "$rev"
-		then
-			continue
-		fi
-		parsedparents=''
-		for parent in $parents
-		do
-			if ! should_ignore_subtree_split_commit "$parent"
-			then
-				parsedparents="$parsedparents$parent "
-			fi
-		done
-		process_split_commit "$rev" "$parsedparents"
+		process_split_commit "$rev" "$parents"
 	done || exit $?
 
 	latest_new=$(cache_get latest_new) || exit $?
@@ -1080,9 +1059,9 @@ cmd_merge () {
 	if test -n "$arg_addmerge_message"
 	then
 		git merge --no-ff -Xsubtree="$arg_prefix" \
-			--message="$arg_addmerge_message" "$rev"
+			--message="$arg_addmerge_message" $arg_gpg_sign "$rev"
 	else
-		git merge --no-ff -Xsubtree="$arg_prefix" $rev
+		git merge --no-ff -Xsubtree="$arg_prefix" $arg_gpg_sign $rev
 	fi
 }
 

@@ -22,10 +22,7 @@ test_description="merge cases"
 #                     underscore notation is to differentiate different
 #                     files that might be renamed into each other's paths.)
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
-. "$TEST_DIRECTORY"/lib-merge.sh
-
 
 ###########################################################################
 # SECTION 1: Cases involving no renames (one side has subset of changes of
@@ -664,7 +661,7 @@ test_setup_4a () {
 #   correct requires doing the merge in-memory first, then realizing that no
 #   updates to the file are necessary, and thus that we can just leave the path
 #   alone.
-test_expect_merge_algorithm failure success '4a: Change on A, change on B subset of A, dirty mods present' '
+test_expect_success '4a: Change on A, change on B subset of A, dirty mods present' '
 	test_setup_4a &&
 	(
 		cd 4a &&

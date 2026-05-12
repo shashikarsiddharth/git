@@ -5,7 +5,6 @@ test_description='test git worktree list'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -30,23 +29,34 @@ test_expect_success 'rev-parse --git-path objects linked worktree' '
 	test_cmp expect actual
 '
 
-test_expect_success '"list" all worktrees from main' '
-	echo "$(git rev-parse --show-toplevel) $(git rev-parse --short HEAD) [$(git symbolic-ref --short HEAD)]" >expect &&
-	test_when_finished "rm -rf here out actual expect && git worktree prune" &&
-	git worktree add --detach here main &&
-	echo "$(git -C here rev-parse --show-toplevel) $(git rev-parse --short HEAD) (detached HEAD)" >>expect &&
-	git worktree list >out &&
-	sed "s/  */ /g" <out >actual &&
+test_expect_success '"list" all worktrees from main core.quotepath=false' '
+	test_config core.quotepath false &&
+	echo "$(git rev-parse --show-toplevel)      $(git rev-parse --short HEAD) [$(git symbolic-ref --short HEAD)]" >expect &&
+	test_when_finished "rm -rf áááá out actual expect && git worktree prune" &&
+	git worktree add --detach áááá main &&
+	echo "$(git -C áááá rev-parse --show-toplevel) $(git rev-parse --short HEAD) (detached HEAD)" >>expect &&
+	git worktree list >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '"list" all worktrees from main core.quotepath=true' '
+	test_config core.quotepath true &&
+	echo "$(git rev-parse --show-toplevel)            $(git rev-parse --short HEAD) [$(git symbolic-ref --short HEAD)]" >expect &&
+	test_when_finished "rm -rf á out actual expect && git worktree prune" &&
+	git worktree add --detach á main &&
+	echo "\"$(git -C á rev-parse --show-toplevel)\" $(git rev-parse --short HEAD) (detached HEAD)" |
+		sed s/á/\\\\303\\\\241/g >>expect &&
+	git worktree list >actual &&
 	test_cmp expect actual
 '
 
 test_expect_success '"list" all worktrees from linked' '
-	echo "$(git rev-parse --show-toplevel) $(git rev-parse --short HEAD) [$(git symbolic-ref --short HEAD)]" >expect &&
-	test_when_finished "rm -rf here out actual expect && git worktree prune" &&
-	git worktree add --detach here main &&
-	echo "$(git -C here rev-parse --show-toplevel) $(git rev-parse --short HEAD) (detached HEAD)" >>expect &&
-	git -C here worktree list >out &&
-	sed "s/  */ /g" <out >actual &&
+	test_config core.quotepath false &&
+	echo "$(git rev-parse --show-toplevel)      $(git rev-parse --short HEAD) [$(git symbolic-ref --short HEAD)]" >expect &&
+	test_when_finished "rm -rf áááá out actual expect && git worktree prune" &&
+	git worktree add --detach áááá main &&
+	echo "$(git -C áááá rev-parse --show-toplevel) $(git rev-parse --short HEAD) (detached HEAD)" >>expect &&
+	git -C áááá worktree list >actual &&
 	test_cmp expect actual
 '
 
@@ -261,6 +271,7 @@ test_expect_success 'broken main worktree still at the top' '
 '
 
 test_expect_success 'linked worktrees are sorted' '
+	test_when_finished "rm -rf sorted" &&
 	mkdir sorted &&
 	git init sorted/main &&
 	(
@@ -268,6 +279,27 @@ test_expect_success 'linked worktrees are sorted' '
 		test_tick &&
 		test_commit new &&
 		git worktree add ../first &&
+		git worktree add ../second &&
+		git worktree list --porcelain >out &&
+		grep ^worktree out >actual
+	) &&
+	cat >expected <<-EOF &&
+	worktree $(pwd)/sorted/main
+	worktree $(pwd)/sorted/first
+	worktree $(pwd)/sorted/second
+	EOF
+	test_cmp expected sorted/main/actual
+'
+
+test_expect_success 'linked worktrees with relative paths are shown with absolute paths' '
+	test_when_finished "rm -rf sorted" &&
+	mkdir sorted &&
+	git init sorted/main &&
+	(
+		cd sorted/main &&
+		test_tick &&
+		test_commit new &&
+		git worktree add --relative-paths ../first &&
 		git worktree add ../second &&
 		git worktree list --porcelain >out &&
 		grep ^worktree out >actual

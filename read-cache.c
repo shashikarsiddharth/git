@@ -5,9 +5,9 @@
  */
 
 #define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
-#include "bulk-checkin.h"
 #include "config.h"
 #include "date.h"
 #include "diff.h"
@@ -19,7 +19,7 @@
 #include "refs.h"
 #include "dir.h"
 #include "object-file.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "oid-array.h"
 #include "tree.h"
 #include "commit.h"
@@ -31,6 +31,7 @@
 #include "path.h"
 #include "preload-index.h"
 #include "read-cache.h"
+#include "repository.h"
 #include "resolve-undo.h"
 #include "revision.h"
 #include "strbuf.h"
@@ -46,6 +47,9 @@
 #include "csum-file.h"
 #include "promisor-remote.h"
 #include "hook.h"
+#include "submodule.h"
+#include "submodule-config.h"
+#include "advice.h"
 
 /* Mask for the name length in ce_flags in the on-disk index */
 
@@ -252,7 +256,7 @@ static int ce_compare_link(const struct cache_entry *ce, size_t expected_size)
 	if (strbuf_readlink(&sb, ce->name, expected_size))
 		return -1;
 
-	buffer = repo_read_object_file(the_repository, &ce->oid, &type, &size);
+	buffer = odb_read_object(the_repository->objects, &ce->oid, &type, &size);
 	if (buffer) {
 		if (size == sb.len)
 			match = memcmp(buffer, sb.buf, size);
@@ -469,6 +473,17 @@ int ie_modified(struct index_state *istate,
 	 * then we know it is.
 	 */
 	if ((changed & DATA_CHANGED) &&
+#ifdef GIT_WINDOWS_NATIVE
+	    /*
+	     * Work around Git for Windows v2.27.0 fixing a bug where symlinks'
+	     * target path lengths were not read at all, and instead recorded
+	     * as 4096: now, all symlinks would appear as modified.
+	     *
+	     * So let's just special-case symlinks with a target path length
+	     * (i.e. `sd_size`) of 4096 and force them to be re-checked.
+	     */
+	    (!S_ISLNK(st->st_mode) || ce->ce_stat_data.sd_size != MAX_PATH) &&
+#endif
 	    (S_ISGITLINK(ce->ce_mode) || ce->ce_stat_data.sd_size != 0))
 		return changed;
 
@@ -688,7 +703,7 @@ static struct cache_entry *create_alias_ce(struct index_state *istate,
 void set_object_name_for_intent_to_add_entry(struct cache_entry *ce)
 {
 	struct object_id oid;
-	if (write_object_file("", 0, OBJ_BLOB, &oid))
+	if (odb_write_object(the_repository->objects, "", 0, OBJ_BLOB, &oid))
 		die(_("cannot create an empty blob in the object database"));
 	oidcpy(&ce->oid, &oid);
 }
@@ -704,19 +719,16 @@ int add_to_index(struct index_state *istate, const char *path, struct stat *st, 
 	int intent_only = flags & ADD_CACHE_INTENT;
 	int add_option = (ADD_CACHE_OK_TO_ADD|ADD_CACHE_OK_TO_REPLACE|
 			  (intent_only ? ADD_CACHE_NEW_ONLY : 0));
-	unsigned hash_flags = pretend ? 0 : HASH_WRITE_OBJECT;
-	struct object_id oid;
+	unsigned hash_flags = pretend ? 0 : INDEX_WRITE_OBJECT;
 
 	if (flags & ADD_CACHE_RENORMALIZE)
-		hash_flags |= HASH_RENORMALIZE;
+		hash_flags |= INDEX_RENORMALIZE;
 
 	if (!S_ISREG(st_mode) && !S_ISLNK(st_mode) && !S_ISDIR(st_mode))
 		return error(_("%s: can only add regular files, symbolic links or git-directories"), path);
 
 	namelen = strlen(path);
 	if (S_ISDIR(st_mode)) {
-		if (repo_resolve_gitlink_ref(the_repository, path, "HEAD", &oid) < 0)
-			return error(_("'%s' does not have a commit checked out"), path);
 		while (namelen && path[namelen-1] == '/')
 			namelen--;
 	}
@@ -1115,48 +1127,19 @@ static int has_dir_name(struct index_state *istate,
 	 *
 	 * Compare the entry's full path with the last path in the index.
 	 */
-	if (istate->cache_nr > 0) {
-		cmp_last = strcmp_offset(name,
-			istate->cache[istate->cache_nr - 1]->name,
-			&len_eq_last);
-		if (cmp_last > 0) {
-			if (name[len_eq_last] != '/') {
-				/*
-				 * The entry sorts AFTER the last one in the
-				 * index.
-				 *
-				 * If there were a conflict with "file", then our
-				 * name would start with "file/" and the last index
-				 * entry would start with "file" but not "file/".
-				 *
-				 * The next character after common prefix is
-				 * not '/', so there can be no conflict.
-				 */
-				return retval;
-			} else {
-				/*
-				 * The entry sorts AFTER the last one in the
-				 * index, and the next character after common
-				 * prefix is '/'.
-				 *
-				 * Either the last index entry is a file in
-				 * conflict with this entry, or it has a name
-				 * which sorts between this entry and the
-				 * potential conflicting file.
-				 *
-				 * In both cases, we fall through to the loop
-				 * below and let the regular search code handle it.
-				 */
-			}
-		} else if (cmp_last == 0) {
-			/*
-			 * The entry exactly matches the last one in the
-			 * index, but because of multiple stage and CE_REMOVE
-			 * items, we fall through and let the regular search
-			 * code handle it.
-			 */
-		}
-	}
+	if (!istate->cache_nr)
+		return 0;
+
+	cmp_last = strcmp_offset(name,
+				 istate->cache[istate->cache_nr - 1]->name,
+				 &len_eq_last);
+	if (cmp_last > 0 && name[len_eq_last] != '/')
+		/*
+		 * The entry sorts AFTER the last one in the
+		 * index and their paths have no common prefix,
+		 * so there cannot be a F/D conflict.
+		 */
+		return 0;
 
 	for (;;) {
 		size_t len;
@@ -1483,7 +1466,8 @@ int repo_refresh_and_write_index(struct repository *repo,
 	struct lock_file lock_file = LOCK_INIT;
 	int fd, ret = 0;
 
-	fd = repo_hold_locked_index(repo, &lock_file, 0);
+	fd = repo_hold_locked_index(repo, &lock_file,
+				    gentle ? 0 : LOCK_REPORT_ON_ERROR);
 	if (!gentle && fd < 0)
 		return -1;
 	if (refresh_index(repo->index, refresh_flags, pathspec, seen, header_msg))
@@ -1521,7 +1505,8 @@ int refresh_index(struct index_state *istate, unsigned int flags,
 	int t2_sum_scan = 0;
 
 	if (flags & REFRESH_PROGRESS && isatty(2))
-		progress = start_delayed_progress(_("Refresh index"),
+		progress = start_delayed_progress(the_repository,
+						  _("Refresh index"),
 						  istate->cache_nr);
 
 	trace_performance_enter();
@@ -1714,7 +1699,7 @@ int verify_ce_order;
 
 static int verify_hdr(const struct cache_header *hdr, unsigned long size)
 {
-	git_hash_ctx c;
+	struct git_hash_ctx c;
 	unsigned char hash[GIT_MAX_RAWSZ];
 	int hdr_version;
 	unsigned char *start, *end;
@@ -1732,12 +1717,12 @@ static int verify_hdr(const struct cache_header *hdr, unsigned long size)
 	end = (unsigned char *)hdr + size;
 	start = end - the_hash_algo->rawsz;
 	oidread(&oid, start, the_repository->hash_algo);
-	if (oideq(&oid, null_oid()))
+	if (oideq(&oid, null_oid(the_hash_algo)))
 		return 0;
 
 	the_hash_algo->init_fn(&c);
-	the_hash_algo->update_fn(&c, hdr, size - the_hash_algo->rawsz);
-	the_hash_algo->final_fn(hash, &c);
+	git_hash_update(&c, hdr, size - the_hash_algo->rawsz);
+	git_hash_final(hash, &c);
 	if (!hasheq(hash, start, the_repository->hash_algo))
 		return error(_("bad index file sha1 signature"));
 	return 0;
@@ -1751,7 +1736,7 @@ static int read_index_extension(struct index_state *istate,
 		istate->cache_tree = cache_tree_read(data, sz);
 		break;
 	case CACHE_EXT_RESOLVE_UNDO:
-		istate->resolve_undo = resolve_undo_read(data, sz);
+		istate->resolve_undo = resolve_undo_read(data, sz, the_hash_algo);
 		break;
 	case CACHE_EXT_LINK:
 		if (read_link_extension(istate, data, sz))
@@ -1832,7 +1817,7 @@ static struct cache_entry *create_from_disk(struct mem_pool *ce_mem_pool,
 
 	if (expand_name_field) {
 		const unsigned char *cp = (const unsigned char *)name;
-		size_t strip_len, previous_len;
+		uint64_t strip_len, previous_len;
 
 		/* If we're at the beginning of a block, ignore the previous name */
 		strip_len = decode_varint(&cp);
@@ -1999,7 +1984,7 @@ static struct index_entry_offset_table *read_ieot_extension(const char *mmap, si
 static void write_ieot_extension(struct strbuf *sb, struct index_entry_offset_table *ieot);
 
 static size_t read_eoie_extension(const char *mmap, size_t mmap_size);
-static void write_eoie_extension(struct strbuf *sb, git_hash_ctx *eoie_context, size_t offset);
+static void write_eoie_extension(struct strbuf *sb, struct git_hash_ctx *eoie_context, size_t offset);
 
 struct load_index_extensions
 {
@@ -2187,6 +2172,7 @@ static unsigned long load_cache_entries_threaded(struct index_state *istate, con
 		if (err)
 			die(_("unable to join load_cache_entries thread: %s"), strerror(err));
 		mem_pool_combine(istate->ce_mem_pool, p->ce_mem_pool);
+		free(p->ce_mem_pool);
 		consumed += p->consumed;
 	}
 
@@ -2323,13 +2309,9 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 	}
 	munmap((void *)mmap, mmap_size);
 
-	/*
-	 * TODO trace2: replace "the_repository" with the actual repo instance
-	 * that is associated with the given "istate".
-	 */
-	trace2_data_intmax("index", the_repository, "read/version",
+	trace2_data_intmax("index", istate->repo, "read/version",
 			   istate->version);
-	trace2_data_intmax("index", the_repository, "read/cache_nr",
+	trace2_data_intmax("index", istate->repo, "read/cache_nr",
 			   istate->cache_nr);
 
 	/*
@@ -2374,16 +2356,12 @@ int read_index_from(struct index_state *istate, const char *path,
 	if (istate->initialized)
 		return istate->cache_nr;
 
-	/*
-	 * TODO trace2: replace "the_repository" with the actual repo instance
-	 * that is associated with the given "istate".
-	 */
-	trace2_region_enter_printf("index", "do_read_index", the_repository,
+	trace2_region_enter_printf("index", "do_read_index", istate->repo,
 				   "%s", path);
 	trace_performance_enter();
 	ret = do_read_index(istate, path, 0);
 	trace_performance_leave("read cache %s", path);
-	trace2_region_leave_printf("index", "do_read_index", the_repository,
+	trace2_region_leave_printf("index", "do_read_index", istate->repo,
 				   "%s", path);
 
 	split_index = istate->split_index;
@@ -2562,7 +2540,7 @@ int repo_index_has_changes(struct repository *repo,
 }
 
 static int write_index_ext_header(struct hashfile *f,
-				  git_hash_ctx *eoie_f,
+				  struct git_hash_ctx *eoie_f,
 				  unsigned int ext,
 				  unsigned int sz)
 {
@@ -2572,8 +2550,8 @@ static int write_index_ext_header(struct hashfile *f,
 	if (eoie_f) {
 		ext = htonl(ext);
 		sz = htonl(sz);
-		the_hash_algo->update_fn(eoie_f, &ext, sizeof(ext));
-		the_hash_algo->update_fn(eoie_f, &sz, sizeof(sz));
+		git_hash_update(eoie_f, &ext, sizeof(ext));
+		git_hash_update(eoie_f, &sz, sizeof(sz));
 	}
 	return 0;
 }
@@ -2679,11 +2657,13 @@ static int ce_write_entry(struct hashfile *f, struct cache_entry *ce,
 		hashwrite(f, ce->name, len);
 		hashwrite(f, padding, align_padding_size(size, len));
 	} else {
-		int common, to_remove, prefix_size;
+		int common, to_remove;
+		uint8_t prefix_size;
 		unsigned char to_remove_vi[16];
+
 		for (common = 0;
-		     (ce->name[common] &&
-		      common < previous_name->len &&
+		     (common < previous_name->len &&
+		      ce->name[common] &&
 		      ce->name[common] == previous_name->buf[common]);
 		     common++)
 			; /* still matching */
@@ -2779,7 +2759,7 @@ static int record_eoie(void)
 {
 	int val;
 
-	if (!git_config_get_bool("index.recordendofindexentries", &val))
+	if (!repo_config_get_bool(the_repository, "index.recordendofindexentries", &val))
 		return val;
 
 	/*
@@ -2794,7 +2774,7 @@ static int record_ieot(void)
 {
 	int val;
 
-	if (!git_config_get_bool("index.recordoffsettable", &val))
+	if (!repo_config_get_bool(the_repository, "index.recordoffsettable", &val))
 		return val;
 
 	/*
@@ -2827,7 +2807,7 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 {
 	uint64_t start = getnanotime();
 	struct hashfile *f;
-	git_hash_ctx *eoie_c = NULL;
+	struct git_hash_ctx *eoie_c = NULL;
 	struct cache_header hdr;
 	int i, err = 0, removed, extended, hdr_version;
 	struct cache_entry **cache = istate->cache;
@@ -2844,7 +2824,7 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 	struct strbuf sb = STRBUF_INIT;
 	int nr, nr_threads, ret;
 
-	f = hashfd(tempfile->fd, tempfile->filename.buf);
+	f = hashfd(the_repository->hash_algo, tempfile->fd, tempfile->filename.buf);
 
 	prepare_repo_settings(r);
 	f->skip_hash = r->settings.index_skip_hash;
@@ -3029,7 +3009,7 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 	    istate->resolve_undo) {
 		strbuf_reset(&sb);
 
-		resolve_undo_write(&sb, istate->resolve_undo);
+		resolve_undo_write(&sb, istate->resolve_undo, the_hash_algo);
 		err = write_index_ext_header(f, eoie_c, CACHE_EXT_RESOLVE_UNDO,
 					     sb.len) < 0;
 		hashwrite(f, sb.buf, sb.len);
@@ -3108,13 +3088,9 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 	istate->timestamp.nsec = ST_MTIME_NSEC(st);
 	trace_performance_since(start, "write index, changed mask = %x", istate->cache_changed);
 
-	/*
-	 * TODO trace2: replace "the_repository" with the actual repo instance
-	 * that is associated with the given "istate".
-	 */
-	trace2_data_intmax("index", the_repository, "write/version",
+	trace2_data_intmax("index", istate->repo, "write/version",
 			   istate->version);
-	trace2_data_intmax("index", the_repository, "write/cache_nr",
+	trace2_data_intmax("index", istate->repo, "write/cache_nr",
 			   istate->cache_nr);
 
 	ret = 0;
@@ -3123,6 +3099,7 @@ out:
 	if (f)
 		free_hashfile(f);
 	strbuf_release(&sb);
+	free(eoie_c);
 	free(ieot);
 	return ret;
 }
@@ -3155,14 +3132,10 @@ static int do_write_locked_index(struct index_state *istate,
 		return ret;
 	}
 
-	/*
-	 * TODO trace2: replace "the_repository" with the actual repo instance
-	 * that is associated with the given "istate".
-	 */
-	trace2_region_enter_printf("index", "do_write_index", the_repository,
+	trace2_region_enter_printf("index", "do_write_index", istate->repo,
 				   "%s", get_lock_file_path(lock));
 	ret = do_write_index(istate, lock->tempfile, write_extensions, flags);
-	trace2_region_leave_printf("index", "do_write_index", the_repository,
+	trace2_region_leave_printf("index", "do_write_index", istate->repo,
 				   "%s", get_lock_file_path(lock));
 
 	if (was_full)
@@ -3238,22 +3211,26 @@ static int should_delete_shared_index(const char *shared_index_path)
 static int clean_shared_index_files(const char *current_hex)
 {
 	struct dirent *de;
-	DIR *dir = opendir(get_git_dir());
+	DIR *dir = opendir(repo_get_git_dir(the_repository));
 
 	if (!dir)
-		return error_errno(_("unable to open git dir: %s"), get_git_dir());
+		return error_errno(_("unable to open git dir: %s"),
+				   repo_get_git_dir(the_repository));
 
 	while ((de = readdir(dir)) != NULL) {
 		const char *sha1_hex;
-		const char *shared_index_path;
+		char *shared_index_path;
 		if (!skip_prefix(de->d_name, "sharedindex.", &sha1_hex))
 			continue;
 		if (!strcmp(sha1_hex, current_hex))
 			continue;
-		shared_index_path = git_path("%s", de->d_name);
+
+		shared_index_path = repo_git_path(the_repository, "%s", de->d_name);
 		if (should_delete_shared_index(shared_index_path) > 0 &&
 		    unlink(shared_index_path))
 			warning_errno(_("unable to unlink: %s"), shared_index_path);
+
+		free(shared_index_path);
 	}
 	closedir(dir);
 
@@ -3265,6 +3242,7 @@ static int write_shared_index(struct index_state *istate,
 {
 	struct split_index *si = istate->split_index;
 	int ret, was_full = !istate->sparse_index;
+	char *path;
 
 	move_cache_to_base_index(istate);
 	convert_to_sparse(istate, 0);
@@ -3280,18 +3258,20 @@ static int write_shared_index(struct index_state *istate,
 
 	if (ret)
 		return ret;
-	ret = adjust_shared_perm(get_tempfile_path(*temp));
+	ret = adjust_shared_perm(the_repository, get_tempfile_path(*temp));
 	if (ret) {
 		error(_("cannot fix permission bits on '%s'"), get_tempfile_path(*temp));
 		return ret;
 	}
-	ret = rename_tempfile(temp,
-			      git_path("sharedindex.%s", oid_to_hex(&si->base->oid)));
+
+	path = repo_git_path(the_repository, "sharedindex.%s", oid_to_hex(&si->base->oid));
+	ret = rename_tempfile(temp, path);
 	if (!ret) {
 		oidcpy(&si->base_oid, &si->base->oid);
 		clean_shared_index_files(oid_to_hex(&si->base->oid));
 	}
 
+	free(path);
 	return ret;
 }
 
@@ -3331,8 +3311,9 @@ int write_locked_index(struct index_state *istate, struct lock_file *lock,
 	int new_shared_index, ret, test_split_index_env;
 	struct split_index *si = istate->split_index;
 
-	if (git_env_bool("GIT_TEST_CHECK_CACHE_TREE", 0))
-		cache_tree_verify(the_repository, istate);
+	if (git_env_bool("GIT_TEST_CHECK_CACHE_TREE", 0) &&
+	    cache_tree_verify(the_repository, istate) < 0)
+		return -1;
 
 	if ((flags & SKIP_IF_UNCHANGED) && !istate->cache_changed) {
 		if (flags & COMMIT_LOCK)
@@ -3371,9 +3352,12 @@ int write_locked_index(struct index_state *istate, struct lock_file *lock,
 	if (new_shared_index) {
 		struct tempfile *temp;
 		int saved_errno;
+		char *path;
 
 		/* Same initial permissions as the main .git/index file */
-		temp = mks_tempfile_sm(git_path("sharedindex_XXXXXX"), 0, 0666);
+		path = repo_git_path(the_repository, "sharedindex_XXXXXX");
+		temp = mks_tempfile_sm(path, 0, 0666);
+		free(path);
 		if (!temp) {
 			ret = do_write_locked_index(istate, lock, flags,
 						    ~WRITE_SPLIT_INDEX_EXTENSION);
@@ -3394,9 +3378,10 @@ int write_locked_index(struct index_state *istate, struct lock_file *lock,
 
 	/* Freshen the shared index only if the split-index was written */
 	if (!ret && !new_shared_index && !is_null_oid(&si->base_oid)) {
-		const char *shared_index = git_path("sharedindex.%s",
-						    oid_to_hex(&si->base_oid));
+		char *shared_index = repo_git_path(the_repository, "sharedindex.%s",
+						   oid_to_hex(&si->base_oid));
 		freshen_shared_index(shared_index, 1);
+		free(shared_index);
 	}
 
 out:
@@ -3497,8 +3482,8 @@ void *read_blob_data_from_index(struct index_state *istate,
 	}
 	if (pos < 0)
 		return NULL;
-	data = repo_read_object_file(the_repository, &istate->cache[pos]->oid,
-				     &type, &sz);
+	data = odb_read_object(the_repository->objects, &istate->cache[pos]->oid,
+			       &type, &sz);
 	if (!data || type != OBJ_BLOB) {
 		free(data);
 		return NULL;
@@ -3572,7 +3557,7 @@ static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 	uint32_t extsize;
 	size_t offset, src_offset;
 	unsigned char hash[GIT_MAX_RAWSZ];
-	git_hash_ctx c;
+	struct git_hash_ctx c;
 
 	/* ensure we have an index big enough to contain an EOIE extension */
 	if (mmap_size < sizeof(struct cache_header) + EOIE_SIZE_WITH_HEADER + the_hash_algo->rawsz)
@@ -3627,12 +3612,12 @@ static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 		if (src_offset + 8 + extsize < src_offset)
 			return 0;
 
-		the_hash_algo->update_fn(&c, mmap + src_offset, 8);
+		git_hash_update(&c, mmap + src_offset, 8);
 
 		src_offset += 8;
 		src_offset += extsize;
 	}
-	the_hash_algo->final_fn(hash, &c);
+	git_hash_final(hash, &c);
 	if (!hasheq(hash, (const unsigned char *)index, the_repository->hash_algo))
 		return 0;
 
@@ -3643,7 +3628,7 @@ static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 	return offset;
 }
 
-static void write_eoie_extension(struct strbuf *sb, git_hash_ctx *eoie_context, size_t offset)
+static void write_eoie_extension(struct strbuf *sb, struct git_hash_ctx *eoie_context, size_t offset)
 {
 	uint32_t buffer;
 	unsigned char hash[GIT_MAX_RAWSZ];
@@ -3653,7 +3638,7 @@ static void write_eoie_extension(struct strbuf *sb, git_hash_ctx *eoie_context, 
 	strbuf_add(sb, &buffer, sizeof(uint32_t));
 
 	/* hash */
-	the_hash_algo->final_fn(hash, eoie_context);
+	git_hash_final(hash, eoie_context);
 	strbuf_add(sb, hash, the_hash_algo->rawsz);
 }
 
@@ -3741,9 +3726,9 @@ void prefetch_cache_entries(const struct index_state *istate,
 
 		if (S_ISGITLINK(ce->ce_mode) || !must_prefetch(ce))
 			continue;
-		if (!oid_object_info_extended(the_repository, &ce->oid,
-					      NULL,
-					      OBJECT_INFO_FOR_PREFETCH))
+		if (!odb_read_object_info_extended(the_repository->objects,
+						   &ce->oid, NULL,
+						   OBJECT_INFO_FOR_PREFETCH))
 			continue;
 		oid_array_append(&to_fetch, &ce->oid);
 	}
@@ -3820,7 +3805,7 @@ void overlay_tree_on_index(struct index_state *istate,
 
 	if (repo_get_oid(the_repository, tree_name, &oid))
 		die("tree-ish %s not found.", tree_name);
-	tree = parse_tree_indirect(&oid);
+	tree = repo_parse_tree_indirect(the_repository, &oid);
 	if (!tree)
 		die("bad tree-ish %s", tree_name);
 
@@ -3891,9 +3876,12 @@ void overlay_tree_on_index(struct index_state *istate,
 
 struct update_callback_data {
 	struct index_state *index;
+	struct repository *repo;
+	struct pathspec *pathspec;
 	int include_sparse;
 	int flags;
 	int add_errors;
+	int ignored_too;
 };
 
 static int fix_unmerged_status(struct diff_filepair *p,
@@ -3917,8 +3905,68 @@ static int fix_unmerged_status(struct diff_filepair *p,
 		return DIFF_STATUS_MODIFIED;
 }
 
+static int skip_submodule(const char *path,
+						struct repository *repo,
+						struct pathspec *pathspec,
+						int ignored_too)
+{
+    struct stat st;
+    const struct submodule *sub;
+    int pathspec_matches = 0;
+    int ps_i;
+    char *norm_pathspec = NULL;
+
+    /* Only consider if path is a directory */
+    if (lstat(path, &st) || !S_ISDIR(st.st_mode))
+		return 0;
+
+    /* Check if it's a submodule with ignore=all */
+    sub = submodule_from_path(repo, null_oid(the_hash_algo), path);
+    if (!sub || !sub->name || !sub->ignore || strcmp(sub->ignore, "all"))
+		return 0;
+
+    trace_printf("ignore=all: %s\n", path);
+    trace_printf("pathspec %s\n", (pathspec && pathspec->nr)
+									? "has pathspec"
+									: "no pathspec");
+
+    /* Check if submodule path is explicitly mentioned in pathspec */
+    if (pathspec) {
+		for (ps_i = 0; ps_i < pathspec->nr; ps_i++) {
+			const char *m = pathspec->items[ps_i].match;
+			if (!m)
+				continue;
+			norm_pathspec = xstrdup(m);
+			strip_dir_trailing_slashes(norm_pathspec);
+			if (!strcmp(path, norm_pathspec)) {
+				pathspec_matches = 1;
+				FREE_AND_NULL(norm_pathspec);
+				break;
+			}
+			FREE_AND_NULL(norm_pathspec);
+		}
+    }
+
+    /* If explicitly matched and forced, allow adding */
+    if (pathspec_matches) {
+		if (ignored_too && ignored_too > 0) {
+			trace_printf("Add submodule due to --force: %s\n", path);
+			return 0;
+		} else {
+			advise_if_enabled(ADVICE_ADD_IGNORED_FILE,
+				_("Skipping submodule due to ignore=all: %s\n"
+					"Use --force if you really want to add the submodule."), path);
+			return 1;
+		}
+    }
+
+    /* No explicit pathspec match -> skip silently */
+    trace_printf("Pathspec to submodule does not match explicitly: %s\n", path);
+    return 1;
+}
+
 static void update_callback(struct diff_queue_struct *q,
-			    struct diff_options *opt UNUSED, void *cbdata)
+							struct diff_options *opt UNUSED, void *cbdata)
 {
 	int i;
 	struct update_callback_data *data = cbdata;
@@ -3928,7 +3976,7 @@ static void update_callback(struct diff_queue_struct *q,
 		const char *path = p->one->path;
 
 		if (!data->include_sparse &&
-		    !path_in_sparse_checkout(path, data->index))
+			!path_in_sparse_checkout(path, data->index))
 			continue;
 
 		switch (fix_unmerged_status(p, data)) {
@@ -3936,6 +3984,11 @@ static void update_callback(struct diff_queue_struct *q,
 			die(_("unexpected diff status %c"), p->status);
 		case DIFF_STATUS_MODIFIED:
 		case DIFF_STATUS_TYPE_CHANGED:
+			if (skip_submodule(path, data->repo,
+								data->pathspec,
+								data->ignored_too))
+				continue;
+
 			if (add_file_to_index(data->index, path, data->flags)) {
 				if (!(data->flags & ADD_CACHE_IGNORE_ERRORS))
 					die(_("updating files failed"));
@@ -3956,8 +4009,9 @@ static void update_callback(struct diff_queue_struct *q,
 
 int add_files_to_cache(struct repository *repo, const char *prefix,
 		       const struct pathspec *pathspec, char *ps_matched,
-		       int include_sparse, int flags)
+		       int include_sparse, int flags, int ignored_too )
 {
+	struct odb_transaction *transaction;
 	struct update_callback_data data;
 	struct rev_info rev;
 
@@ -3965,6 +4019,9 @@ int add_files_to_cache(struct repository *repo, const char *prefix,
 	data.index = repo->index;
 	data.include_sparse = include_sparse;
 	data.flags = flags;
+	data.repo = repo;
+	data.ignored_too = ignored_too;
+	data.pathspec = (struct pathspec *)pathspec;
 
 	repo_init_revisions(repo, &rev, prefix);
 	setup_revisions(0, NULL, &rev, NULL);
@@ -3976,6 +4033,7 @@ int add_files_to_cache(struct repository *repo, const char *prefix,
 	rev.diffopt.format_callback = update_callback;
 	rev.diffopt.format_callback_data = &data;
 	rev.diffopt.flags.override_submodule_config = 1;
+	rev.diffopt.detect_rename = 0; /* staging worktree changes does not need renames */
 	rev.max_count = 0; /* do not compare unmerged paths with stage #2 */
 
 	/*
@@ -3983,9 +4041,9 @@ int add_files_to_cache(struct repository *repo, const char *prefix,
 	 * This function is invoked from commands other than 'add', which
 	 * may not have their own transaction active.
 	 */
-	begin_odb_transaction();
+	transaction = odb_transaction_begin(repo->objects);
 	run_diff_files(&rev, DIFF_RACY_IS_MODIFIED);
-	end_odb_transaction();
+	odb_transaction_commit(transaction);
 
 	release_revisions(&rev);
 	return !!data.add_errors;

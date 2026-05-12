@@ -31,7 +31,7 @@
  *
  * For more info about: trace2 targets, conventions for public functions and
  * macros, trace2 target formats and examples on trace2 API usage refer to
- * Documentation/technical/api-trace2.txt
+ * Documentation/technical/api-trace2.adoc
  *
  */
 
@@ -554,6 +554,7 @@ enum trace2_counter_id {
 	TRACE2_COUNTER_ID_TEST2,     /* emits summary and thread events */
 
 	TRACE2_COUNTER_ID_PACKED_REFS_JUMPS, /* counts number of jumps */
+	TRACE2_COUNTER_ID_REFTABLE_RESEEKS, /* counts number of re-seeks */
 
 	/* counts number of fsyncs */
 	TRACE2_COUNTER_ID_FSYNC_WRITEOUT_ONLY,

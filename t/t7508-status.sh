@@ -5,7 +5,6 @@
 
 test_description='git status'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-terminal.sh
 
@@ -718,6 +717,17 @@ test_expect_success TTY 'status -s with color.status' '
 
 '
 
+test_expect_success TTY 'status -s keeps colors with -z' '
+	test_when_finished "rm -f output.*" &&
+	test_terminal git status -s -z >output.raw &&
+	# convert back to newlines to avoid portability issues with
+	# test_decode_color and test_cmp, and to let us use the same expected
+	# output as earlier tests
+	tr "\0" "\n" <output.raw >output.nl &&
+	test_decode_color <output.nl >output &&
+	test_cmp expect output
+'
+
 cat >expect <<\EOF
 ## <YELLOW>main<RESET>...<CYAN>upstream<RESET> [ahead <YELLOW>1<RESET>, behind <CYAN>2<RESET>]
  <RED>M<RESET> dir1/modified
@@ -763,8 +773,8 @@ test_expect_success TTY 'status --porcelain ignores color.status' '
 '
 
 # recover unconditionally from color tests
-git config --unset color.status
-git config --unset color.ui
+git config --unset color.status || :
+git config --unset color.ui || :
 
 test_expect_success 'status --porcelain respects -b' '
 
@@ -1067,7 +1077,7 @@ test_expect_success 'status -s submodule summary (clean submodule)' '
 
 test_expect_success 'status -z implies porcelain' '
 	git status --porcelain |
-	perl -pe "s/\012/\000/g" >expect &&
+	tr "\012" "\000" >expect &&
 	git status -z >output &&
 	test_cmp expect output
 '
@@ -1566,7 +1576,7 @@ test_expect_success 'git commit will commit a staged but ignored submodule' '
 
 test_expect_success 'git commit --dry-run will show a staged but ignored submodule' '
 	git reset HEAD^ &&
-	git add sm &&
+	git add --force sm &&
 	cat >expect << EOF &&
 On branch main
 Your branch and '\''upstream'\'' have diverged,
@@ -1700,7 +1710,7 @@ test_expect_success 'setup slow status advice' '
 		EOF
 		git add .gitignore &&
 		git commit -m "Add .gitignore" &&
-		git config advice.statusuoption true
+		git config set advice.statusuoption true
 	)
 '
 

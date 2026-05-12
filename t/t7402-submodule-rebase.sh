@@ -5,7 +5,6 @@
 
 test_description='Test rebasing, stashing, etc. with submodules'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success setup '
@@ -125,11 +124,8 @@ test_expect_success 'rebasing submodule that should conflict' '
 		echo "160000 $(git rev-parse HEAD) 3	submodule"
 	) >expect &&
 	test_cmp expect actual &&
-	if test "$GIT_TEST_MERGE_ALGORITHM" = ort
-    then
-		sub_expect="go to submodule (submodule), and either merge commit $(git -C submodule rev-parse --short HEAD^0)" &&
-		grep "$sub_expect" actual_output
-	fi
+	sub_expect="go to submodule (submodule), and either merge commit $(git -C submodule rev-parse --short HEAD^0)" &&
+	grep "$sub_expect" actual_output
 '
 
 test_done

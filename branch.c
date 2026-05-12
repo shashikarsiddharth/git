@@ -116,7 +116,7 @@ static int install_branch_config_multiple_remotes(int flag, const char *local,
 			}
 
 	strbuf_addf(&key, "branch.%s.remote", local);
-	if (git_config_set_gently(key.buf, origin ? origin : ".") < 0)
+	if (repo_config_set_gently(the_repository, key.buf, origin ? origin : ".") < 0)
 		goto out_err;
 
 	strbuf_reset(&key);
@@ -127,16 +127,16 @@ static int install_branch_config_multiple_remotes(int flag, const char *local,
 	 * more than one is provided, use CONFIG_REGEX_NONE to preserve what
 	 * we've written so far.
 	 */
-	if (git_config_set_gently(key.buf, NULL) < 0)
+	if (repo_config_set_gently(the_repository, key.buf, NULL) < 0)
 		goto out_err;
 	for_each_string_list_item(item, remotes)
-		if (git_config_set_multivar_gently(key.buf, item->string, CONFIG_REGEX_NONE, 0) < 0)
+		if (repo_config_set_multivar_gently(the_repository, key.buf, item->string, CONFIG_REGEX_NONE, 0) < 0)
 			goto out_err;
 
 	if (rebasing) {
 		strbuf_reset(&key);
 		strbuf_addf(&key, "branch.%s.rebase", local);
-		if (git_config_set_gently(key.buf, "true") < 0)
+		if (repo_config_set_gently(the_repository, key.buf, "true") < 0)
 			goto out_err;
 	}
 	strbuf_release(&key);
@@ -230,7 +230,7 @@ static int inherit_tracking(struct tracking *tracking, const char *orig_ref)
 		return -1;
 	}
 
-	if (branch->merge_nr < 1 || !branch->merge_name || !branch->merge_name[0]) {
+	if (branch->merge_nr < 1 || !branch->merge || !branch->merge[0] || !branch->merge[0]->src) {
 		warning(_("asked to inherit tracking from '%s', but no merge configuration is set"),
 			bare_ref);
 		return -1;
@@ -238,7 +238,7 @@ static int inherit_tracking(struct tracking *tracking, const char *orig_ref)
 
 	tracking->remote = branch->remote_name;
 	for (i = 0; i < branch->merge_nr; i++)
-		string_list_append(tracking->srcs, branch->merge_name[i]);
+		string_list_append(tracking->srcs, branch->merge[i]->src);
 	return 0;
 }
 
@@ -355,7 +355,7 @@ int read_branch_desc(struct strbuf *buf, const char *branch_name)
 	char *v = NULL;
 	struct strbuf name = STRBUF_INIT;
 	strbuf_addf(&name, "branch.%s.description", branch_name);
-	if (git_config_get_string(name.buf, &v)) {
+	if (repo_config_get_string(the_repository, name.buf, &v)) {
 		strbuf_release(&name);
 		return -1;
 	}
@@ -372,10 +372,10 @@ int read_branch_desc(struct strbuf *buf, const char *branch_name)
  */
 int validate_branchname(const char *name, struct strbuf *ref)
 {
-	if (strbuf_check_branch_ref(ref, name)) {
+	if (check_branch_ref(ref, name)) {
 		int code = die_message(_("'%s' is not a valid branch name"), name);
 		advise_if_enabled(ADVICE_REF_SYNTAX,
-				  _("See `man git check-ref-format`"));
+				  _("See 'git help check-ref-format'"));
 		exit(code);
 	}
 
@@ -397,7 +397,7 @@ static void prepare_checked_out_branches(void)
 	worktrees = get_worktrees();
 
 	while (worktrees[i]) {
-		char *old;
+		char *old, *wt_gitdir;
 		struct wt_status_state state = { 0 };
 		struct worktree *wt = worktrees[i++];
 		struct string_list update_refs = STRING_LIST_INIT_DUP;
@@ -437,7 +437,8 @@ static void prepare_checked_out_branches(void)
 		}
 		wt_status_state_free_buffers(&state);
 
-		if (!sequencer_get_update_refs_state(get_worktree_git_dir(wt),
+		wt_gitdir = get_worktree_git_dir(wt);
+		if (!sequencer_get_update_refs_state(wt_gitdir,
 						     &update_refs)) {
 			struct string_list_item *item;
 			for_each_string_list_item(item, &update_refs) {
@@ -448,6 +449,8 @@ static void prepare_checked_out_branches(void)
 			}
 			string_list_clear(&update_refs, 1);
 		}
+
+		free(wt_gitdir);
 	}
 
 	free_worktrees(worktrees);
@@ -601,6 +604,7 @@ void create_branch(struct repository *r,
 	int forcing = 0;
 	struct ref_transaction *transaction;
 	struct strbuf err = STRBUF_INIT;
+	int flags = 0;
 	char *msg;
 
 	if (track == BRANCH_TRACK_OVERRIDE)
@@ -619,18 +623,18 @@ void create_branch(struct repository *r,
 		goto cleanup;
 
 	if (reflog)
-		log_all_ref_updates = LOG_REFS_NORMAL;
+		flags |= REF_FORCE_CREATE_REFLOG;
 
 	if (forcing)
 		msg = xstrfmt("branch: Reset to %s", start_name);
 	else
 		msg = xstrfmt("branch: Created from %s", start_name);
 	transaction = ref_store_transaction_begin(get_main_ref_store(the_repository),
-						  &err);
+						  0, &err);
 	if (!transaction ||
 		ref_transaction_update(transaction, ref.buf,
-					&oid, forcing ? NULL : null_oid(),
-					NULL, NULL, 0, msg, &err) ||
+					&oid, forcing ? NULL : null_oid(the_hash_algo),
+					NULL, NULL, flags, msg, &err) ||
 		ref_transaction_commit(transaction, &err))
 		die("%s", err.buf);
 	ref_transaction_free(transaction);
@@ -737,6 +741,7 @@ static int submodule_create_branch(struct repository *r,
 
 	strbuf_release(&child_err);
 	strbuf_release(&out_buf);
+	free(out_prefix);
 	return ret;
 }
 
@@ -793,7 +798,7 @@ void create_branches_recursively(struct repository *r, const char *name,
 	create_branch(r, name, start_committish, force, 0, reflog, quiet,
 		      BRANCH_TRACK_NEVER, dry_run);
 	if (dry_run)
-		return;
+		goto out;
 	/*
 	 * NEEDSWORK If tracking was set up in the superproject but not the
 	 * submodule, users might expect "git branch --recurse-submodules" to
@@ -814,8 +819,11 @@ void create_branches_recursively(struct repository *r, const char *name,
 			die(_("submodule '%s': cannot create branch '%s'"),
 			    submodule_entry_list.entries[i].submodule->name,
 			    name);
-		repo_clear(submodule_entry_list.entries[i].repo);
 	}
+
+out:
+	submodule_entry_list_release(&submodule_entry_list);
+	free(branch_point);
 }
 
 void remove_merge_branch_state(struct repository *r)

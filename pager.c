@@ -82,7 +82,7 @@ static int core_pager_config(const char *var, const char *value,
 	return 0;
 }
 
-const char *git_pager(int stdout_is_tty)
+const char *git_pager(struct repository *r, int stdout_is_tty)
 {
 	const char *pager;
 
@@ -92,7 +92,8 @@ const char *git_pager(int stdout_is_tty)
 	pager = getenv("GIT_PAGER");
 	if (!pager) {
 		if (!pager_program)
-			read_early_config(core_pager_config, NULL);
+			read_early_config(r,
+					  core_pager_config, NULL);
 		pager = pager_program;
 	}
 	if (!pager)
@@ -107,10 +108,11 @@ const char *git_pager(int stdout_is_tty)
 
 static void setup_pager_env(struct strvec *env)
 {
-	const char **argv;
+	char **argv;
 	int i;
 	char *pager_env = xstrdup(PAGER_ENV);
-	int n = split_cmdline(pager_env, &argv);
+	/* split_cmdline splits in place, so we know the result is writable */
+	int n = split_cmdline(pager_env, (const char ***)&argv);
 
 	if (n < 0)
 		die("malformed build-time PAGER_ENV: %s",
@@ -140,10 +142,10 @@ void prepare_pager_args(struct child_process *pager_process, const char *pager)
 	pager_process->trace2_child_class = "pager";
 }
 
-void setup_pager(void)
+void setup_pager(struct repository *r)
 {
 	static int once = 0;
-	const char *pager = git_pager(isatty(1));
+	const char *pager = git_pager(r, isatty(1));
 
 	if (!pager)
 		return;
@@ -290,7 +292,7 @@ static int pager_command_config(const char *var, const char *value,
 }
 
 /* returns 0 for "no pager", 1 for "use pager", and -1 for "not specified" */
-int check_pager_config(const char *cmd)
+int check_pager_config(struct repository *r, const char *cmd)
 {
 	struct pager_command_config_data data;
 
@@ -298,7 +300,7 @@ int check_pager_config(const char *cmd)
 	data.want = -1;
 	data.value = NULL;
 
-	read_early_config(pager_command_config, &data);
+	read_early_config(r, pager_command_config, &data);
 
 	if (data.value)
 		pager_program = data.value;

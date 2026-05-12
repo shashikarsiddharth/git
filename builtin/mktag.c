@@ -1,3 +1,4 @@
+#define USE_THE_REPOSITORY_VARIABLE
 #include "builtin.h"
 #include "gettext.h"
 #include "hex.h"
@@ -5,7 +6,7 @@
 #include "strbuf.h"
 #include "replace-object.h"
 #include "object-file.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "fsck.h"
 #include "config.h"
 
@@ -15,7 +16,7 @@ static char const * const builtin_mktag_usage[] = {
 };
 static int option_strict = 1;
 
-static struct fsck_options fsck_options = FSCK_OPTIONS_STRICT;
+static struct fsck_options fsck_options;
 
 static int mktag_fsck_error_func(struct fsck_options *o UNUSED,
 				 void *fsck_report UNUSED,
@@ -40,7 +41,7 @@ static int mktag_fsck_error_func(struct fsck_options *o UNUSED,
 		fprintf_ln(stderr, _("error: tag input does not pass fsck: %s"), message);
 		return 1;
 	default:
-		BUG(_("%d (FSCK_IGNORE?) should never trigger this callback"),
+		BUG("%d (FSCK_IGNORE?) should never trigger this callback",
 		    msg_type);
 	}
 }
@@ -53,8 +54,8 @@ static int verify_object_in_tag(struct object_id *tagged_oid, int *tagged_type)
 	void *buffer;
 	const struct object_id *repl;
 
-	buffer = repo_read_object_file(the_repository, tagged_oid, &type,
-				       &size);
+	buffer = odb_read_object(the_repository->objects, tagged_oid,
+				 &type, &size);
 	if (!buffer)
 		die(_("could not read tagged object '%s'"),
 		    oid_to_hex(tagged_oid));
@@ -71,7 +72,10 @@ static int verify_object_in_tag(struct object_id *tagged_oid, int *tagged_type)
 	return ret;
 }
 
-int cmd_mktag(int argc, const char **argv, const char *prefix)
+int cmd_mktag(int argc,
+	      const char **argv,
+	      const char *prefix,
+	      struct repository *repo)
 {
 	static struct option builtin_mktag_options[] = {
 		OPT_BOOL(0, "strict", &option_strict,
@@ -90,11 +94,12 @@ int cmd_mktag(int argc, const char **argv, const char *prefix)
 	if (strbuf_read(&buf, 0, 0) < 0)
 		die_errno(_("could not read from stdin"));
 
+	fsck_options_init(&fsck_options, repo, FSCK_OPTIONS_STRICT);
 	fsck_options.error_func = mktag_fsck_error_func;
 	fsck_set_msg_type_from_ids(&fsck_options, FSCK_MSG_EXTRA_HEADER_ENTRY,
 				   FSCK_WARN);
 	/* config might set fsck.extraHeaderEntry=* again */
-	git_config(git_fsck_config, &fsck_options);
+	repo_config(the_repository, git_fsck_config, &fsck_options);
 	if (fsck_tag_standalone(NULL, buf.buf, buf.len, &fsck_options,
 				&tagged_oid, &tagged_type))
 		die(_("tag on stdin did not pass our strict fsck check"));
@@ -102,7 +107,7 @@ int cmd_mktag(int argc, const char **argv, const char *prefix)
 	if (verify_object_in_tag(&tagged_oid, &tagged_type) < 0)
 		die(_("tag on stdin did not refer to a valid object"));
 
-	if (write_object_file(buf.buf, buf.len, OBJ_TAG, &result) < 0)
+	if (odb_write_object(the_repository->objects, buf.buf, buf.len, OBJ_TAG, &result) < 0)
 		die(_("unable to write tag file"));
 
 	strbuf_release(&buf);

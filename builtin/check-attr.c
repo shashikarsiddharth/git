@@ -1,3 +1,4 @@
+#define USE_THE_REPOSITORY_VARIABLE
 #include "builtin.h"
 #include "config.h"
 #include "attr.h"
@@ -5,7 +6,6 @@
 #include "gettext.h"
 #include "object-name.h"
 #include "quote.h"
-#include "repository.h"
 #include "setup.h"
 #include "parse-options.h"
 #include "write-or-die.h"
@@ -107,7 +107,10 @@ static NORETURN void error_with_usage(const char *msg)
 	usage_with_options(check_attr_usage, check_attr_options);
 }
 
-int cmd_check_attr(int argc, const char **argv, const char *prefix)
+int cmd_check_attr(int argc,
+		   const char **argv,
+		   const char *prefix,
+		   struct repository *repo UNUSED)
 {
 	struct attr_check *check;
 	struct object_id initialized_oid;
@@ -116,7 +119,7 @@ int cmd_check_attr(int argc, const char **argv, const char *prefix)
 	if (!is_bare_repository())
 		setup_work_tree();
 
-	git_config(git_default_config, NULL);
+	repo_config(the_repository, git_default_config, NULL);
 
 	argc = parse_options(argc, argv, prefix, check_attr_options,
 			     check_attr_usage, PARSE_OPT_KEEP_DASHDASH);

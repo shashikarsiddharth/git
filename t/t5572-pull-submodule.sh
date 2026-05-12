@@ -5,7 +5,6 @@ test_description='pull can handle submodules'
 GIT_TEST_FATAL_REGISTER_SUBMODULE_ODB=1
 export GIT_TEST_FATAL_REGISTER_SUBMODULE_ODB
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-submodule-update.sh
 
@@ -46,11 +45,6 @@ git_pull_noff () {
 	$2 git pull --no-ff
 }
 
-if test "$GIT_TEST_MERGE_ALGORITHM" != ort
-then
-	KNOWN_FAILURE_NOFF_MERGE_DOESNT_CREATE_EMPTY_SUBMODULE_DIR=1
-	KNOWN_FAILURE_NOFF_MERGE_ATTEMPTS_TO_MERGE_REMOVED_SUBMODULE_FILES=1
-fi
 test_submodule_switch_func "git_pull_noff"
 
 test_expect_success 'setup' '
@@ -230,6 +224,7 @@ test_expect_success 'branch has no merge base with remote-tracking counterpart' 
 
 	test_create_repo a-submodule &&
 	test_commit -C a-submodule foo &&
+	test_commit -C a-submodule bar &&
 
 	test_create_repo parent &&
 	git -C parent submodule add "$(pwd)/a-submodule" &&
@@ -244,6 +239,44 @@ test_expect_success 'branch has no merge base with remote-tracking counterpart' 
 	git -C child reset --hard "$OTHER" &&
 
 	git -C child pull --recurse-submodules --rebase
+'
+
+test_expect_success 'fetch submodule remote of different name from superproject' '
+	git -C child remote rename origin o1 &&
+	git -C child submodule update --init &&
+
+	# Needs to create unreachable commit from current master branch.
+	git -C a-submodule checkout -b newmain HEAD^ &&
+	test_commit -C a-submodule echo &&
+	test_commit -C a-submodule moreecho &&
+	subc=$(git -C a-submodule rev-parse --short HEAD) &&
+
+	git -C parent/a-submodule fetch &&
+	git -C parent/a-submodule checkout "$subc" &&
+	git -C parent commit -m "update submodule" a-submodule &&
+	git -C a-submodule reset --hard HEAD^^ &&
+
+	git -C child pull --no-recurse-submodules &&
+	git -C child submodule update &&
+	test_path_is_file child/a-submodule/moreecho.t
+'
+
+test_expect_success 'fetch non-origin submodule remote named different from superproject' '
+	git -C child/a-submodule remote rename origin o2 &&
+
+	# Create commit that is unreachable from current master branch
+	# newmain is already reset in the previous test
+	test_commit -C a-submodule echo_o2 &&
+	test_commit -C a-submodule moreecho_o2 &&
+	subc=$(git -C a-submodule rev-parse --short HEAD) &&
+
+	git -C parent/a-submodule fetch &&
+	git -C parent/a-submodule checkout "$subc" &&
+	git -C parent commit -m "update submodule o2" a-submodule &&
+	git -C a-submodule reset --hard HEAD^^ &&
+
+	git -C child pull --recurse-submodules &&
+	test_path_is_file child/a-submodule/moreecho_o2.t
 '
 
 test_done

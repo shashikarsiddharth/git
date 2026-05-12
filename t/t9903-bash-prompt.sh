@@ -8,7 +8,6 @@ test_description='test git-specific bash prompt functions'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./lib-bash.sh
 
 . "$GIT_BUILD_DIR/contrib/completion/git-prompt.sh"
@@ -66,10 +65,6 @@ test_expect_success 'prompt - unborn branch' '
 	__git_ps1 >"$actual" &&
 	test_cmp expected "$actual"
 '
-
-if test_have_prereq !FUNNYNAMES; then
-	say 'Your filesystem does not allow newlines in filenames.'
-fi
 
 test_expect_success FUNNYNAMES 'prompt - with newline in path' '
     repo_with_newline="repo

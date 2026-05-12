@@ -2,7 +2,6 @@
 
 test_description='wildmatch tests'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 should_create_test_file() {
@@ -236,6 +235,8 @@ match 1 1 1 1 aaaaaaabababab '*ab'
 match 1 1 1 1 'foo*' 'foo\*'
 match 0 0 0 0 foobar 'foo\*bar'
 match 1 1 1 1 'f\oo' 'f\\oo'
+match 0 0 0 0 \
+      1 1 1 1 'foo\' 'foo\'
 match 1 1 1 1 ball '*[al]?'
 match 0 0 0 0 ten '[ten]'
 match 1 1 1 1 ten '**[!te]'

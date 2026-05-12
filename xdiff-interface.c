@@ -1,10 +1,11 @@
-#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
+#include "environment.h"
 #include "gettext.h"
 #include "config.h"
 #include "hex.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "strbuf.h"
 #include "xdiff-interface.h"
 #include "xdiff/xtypes.h"
@@ -175,18 +176,19 @@ int read_mmfile(mmfile_t *ptr, const char *filename)
 	return 0;
 }
 
-void read_mmblob(mmfile_t *ptr, const struct object_id *oid)
+void read_mmblob(mmfile_t *ptr, struct object_database *odb,
+		 const struct object_id *oid)
 {
 	unsigned long size;
 	enum object_type type;
 
-	if (oideq(oid, null_oid())) {
+	if (is_null_oid(oid)) {
 		ptr->ptr = xstrdup("");
 		ptr->size = 0;
 		return;
 	}
 
-	ptr->ptr = repo_read_object_file(the_repository, oid, &type, &size);
+	ptr->ptr = odb_read_object(odb, oid, &type, &size);
 	if (!ptr->ptr || type != OBJ_BLOB)
 		die("unable to read blob object %s", oid_to_hex(oid));
 	ptr->size = size;
@@ -298,7 +300,7 @@ void xdiff_clear_find_func(xdemitconf_t *xecfg)
 
 unsigned long xdiff_hash_string(const char *s, size_t len, long flags)
 {
-	return xdl_hash_record(&s, s + len, flags);
+	return xdl_hash_record((uint8_t const**)&s, (uint8_t const*)s + len, flags);
 }
 
 int xdiff_compare_lines(const char *l1, long s1,

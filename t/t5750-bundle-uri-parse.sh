@@ -3,7 +3,6 @@
 test_description="Test bundle-uri bundle_uri_parse_line()"
 
 TEST_NO_CREATE_REPO=1
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'bundle_uri_parse_line() just URIs' '
@@ -285,6 +284,32 @@ test_expect_success 'parse config format edge cases: creationToken heuristic' '
 
 	test-tool bundle-uri parse-config expect >actual 2>err &&
 	grep "could not parse bundle list key creationToken with value '\''bogus'\''" err
+'
+
+test_expect_success 'parse config format: bundle with missing uri' '
+	cat >input <<-\EOF &&
+	[bundle]
+		version = 1
+		mode = all
+	[bundle "missing-uri"]
+		creationToken = 1
+	EOF
+
+	test_must_fail test-tool bundle-uri parse-config input 2>err &&
+	grep "bundle '\''missing-uri'\'' has no uri" err
+'
+
+test_expect_success 'parse config format: bundle with url instead of uri' '
+	cat >input <<-\EOF &&
+	[bundle]
+		version = 1
+		mode = all
+	[bundle "typo"]
+		url = https://example.com/bundle.bdl
+	EOF
+
+	test_must_fail test-tool bundle-uri parse-config input 2>err &&
+	grep "bundle '\''typo'\'' has no uri" err
 '
 
 test_done

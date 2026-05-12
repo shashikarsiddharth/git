@@ -1,6 +1,7 @@
 #!/bin/sh
 
 test_description='exercise basic multi-pack bitmap functionality'
+
 . ./test-lib.sh
 . "${TEST_DIRECTORY}/lib-bitmap.sh"
 
@@ -92,7 +93,8 @@ test_midx_bitmap_cases () {
 	test_expect_success 'setup test_repository' '
 		rm -rf * .git &&
 		git init &&
-		git config pack.writeBitmapLookupTable '"$writeLookupTable"'
+		git config pack.writeBitmapLookupTable '"$writeLookupTable"' &&
+		git config maintenance.auto false
 	'
 
 	midx_bitmap_core
@@ -175,8 +177,8 @@ test_midx_bitmap_cases () {
 			comm -13 bitmaps commits >before &&
 			test_line_count = 1 before &&
 
-			perl -ne "printf(\"create refs/tags/include/%d \", $.); print" \
-				<before | git update-ref --stdin &&
+			sed "s|\(.*\)|create refs/tags/include/\1 \1|" before |
+			git update-ref --stdin &&
 
 			rm -fr $midx-$(midx_checksum $objdir).bitmap &&
 			rm -fr $midx &&

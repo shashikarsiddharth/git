@@ -16,7 +16,6 @@ filesystem.
     path4       - an empty directory
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup ' '
@@ -72,25 +71,6 @@ test_expect_success 'ls-files --others handles non-submodule .git' '
 	echo foo >not-a-submodule/.git &&
 	git ls-files -o >output &&
 	test_cmp expected1 output
-'
-
-test_expect_success SYMLINKS 'ls-files --others with symlinked submodule' '
-	git init super &&
-	git init sub &&
-	(
-		cd sub &&
-		>a &&
-		git add a &&
-		git commit -m sub &&
-		git pack-refs --all
-	) &&
-	(
-		cd super &&
-		"$SHELL_PATH" "$TEST_DIRECTORY/../contrib/workdir/git-new-workdir" ../sub sub &&
-		git ls-files --others --exclude-standard >../actual
-	) &&
-	echo sub/ >expect &&
-	test_cmp expect actual
 '
 
 test_expect_success 'setup nested pathspec search' '

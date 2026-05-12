@@ -292,7 +292,7 @@ compat_symbol (libc, __compat_regexec, regexec, GLIBC_2_0);
    concerned.
 
    If REGS is not NULL, and BUFP->no_sub is not set, the offsets of the match
-   and all groups is stroed in REGS.  (For the "_2" variants, the offsets are
+   and all groups are stored in REGS.  (For the "_2" variants, the offsets are
    computed relative to the concatenation, not relative to the individual
    strings.)
 
@@ -2210,7 +2210,7 @@ sift_states_bkref (const re_match_context_t *mctx, re_sift_context_t *sctx,
 	  /* mctx->bkref_ents may have changed, reload the pointer.  */
 	  entry = mctx->bkref_ents + enabled_idx;
 	}
-      while (enabled_idx++, entry++->more);
+      while ((void)enabled_idx++, entry++->more);
     }
   err = REG_NOERROR;
  free_return:

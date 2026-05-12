@@ -69,7 +69,7 @@ static int should_break(struct repository *r,
 	    oideq(&src->oid, &dst->oid))
 		return 0; /* they are the same */
 
-	if (r == the_repository && repo_has_promisor_remote(the_repository)) {
+	if (repo_has_promisor_remote(r)) {
 		options.missing_object_cb = diff_queued_diff_prefetch;
 		options.missing_object_data = r;
 	}
@@ -131,7 +131,7 @@ static int should_break(struct repository *r,
 void diffcore_break(struct repository *r, int break_score)
 {
 	struct diff_queue_struct *q = &diff_queued_diff;
-	struct diff_queue_struct outq;
+	struct diff_queue_struct outq = DIFF_QUEUE_INIT;
 
 	/* When the filepair has this much edit (insert and delete),
 	 * it is first considered to be a rewrite and broken into a
@@ -178,8 +178,6 @@ void diffcore_break(struct repository *r, int break_score)
 	if (!merge_score)
 		merge_score = DEFAULT_MERGE_SCORE;
 
-	DIFF_QUEUE_CLEAR(&outq);
-
 	for (i = 0; i < q->nr; i++) {
 		struct diff_filepair *p = q->queue[i];
 		int score;
@@ -224,6 +222,7 @@ void diffcore_break(struct repository *r, int break_score)
 				free(p); /* not diff_free_filepair(), we are
 					  * reusing one and two here.
 					  */
+				q->queue[i] = NULL;
 				continue;
 			}
 		}
@@ -266,8 +265,8 @@ static void merge_broken(struct diff_filepair *p,
 	 * in the resulting tree.
 	 */
 	d->one->rename_used++;
-	diff_free_filespec_data(d->two);
-	diff_free_filespec_data(c->one);
+	free_filespec(d->two);
+	free_filespec(c->one);
 	free(d);
 	free(c);
 }
@@ -275,10 +274,8 @@ static void merge_broken(struct diff_filepair *p,
 void diffcore_merge_broken(void)
 {
 	struct diff_queue_struct *q = &diff_queued_diff;
-	struct diff_queue_struct outq;
+	struct diff_queue_struct outq = DIFF_QUEUE_INIT;
 	int i, j;
-
-	DIFF_QUEUE_CLEAR(&outq);
 
 	for (i = 0; i < q->nr; i++) {
 		struct diff_filepair *p = q->queue[i];

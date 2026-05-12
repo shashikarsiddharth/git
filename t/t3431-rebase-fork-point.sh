@@ -8,7 +8,6 @@ test_description='git rebase --fork-point test'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 # A---B---D---E    (main)
@@ -18,6 +17,12 @@ TEST_PASSES_SANITIZE_LEAK=true
 # C was formerly part of main but main was rewound to remove C
 #
 test_expect_success setup '
+	# Commit dates are hardcoded to 2005, and the reflog entries will have
+	# a matching timestamp. Maintenance may thus immediately expire
+	# reflogs if it was running.
+	git config set gc.reflogExpire never &&
+	git config set gc.reflogExpireUnreachable never &&
+
 	test_commit A &&
 	test_commit B &&
 	test_commit C &&
@@ -74,7 +79,7 @@ test_rebase 'G F C D B A' --onto D main
 test_rebase 'G F C B A' --keep-base refs/heads/main
 test_rebase 'G F C B A' --keep-base main
 
-test_expect_success 'git rebase --fork-point with ambigous refname' '
+test_expect_success 'git rebase --fork-point with ambiguous refname' '
 	git checkout main &&
 	git checkout -b one &&
 	git checkout side &&

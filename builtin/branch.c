@@ -5,6 +5,8 @@
  * Based on git-branch.sh by Junio C Hamano.
  */
 
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "builtin.h"
 #include "config.h"
 #include "color.h"
@@ -44,7 +46,7 @@ static struct object_id head_oid;
 static int recurse_submodules = 0;
 static int submodule_propagate_branches = 0;
 
-static int branch_use_color = -1;
+static enum git_colorbool branch_use_color = GIT_COLOR_UNKNOWN;
 static char branch_colors[][COLOR_MAXLEN] = {
 	GIT_COLOR_RESET,
 	GIT_COLOR_NORMAL,       /* PLAIN */
@@ -226,7 +228,7 @@ static int delete_branches(int argc, const char **argv, int force, int kinds,
 	int ret = 0;
 	int remote_branch = 0;
 	struct strbuf bname = STRBUF_INIT;
-	unsigned allowed_interpret;
+	enum interpret_branch_kind allowed_interpret;
 	struct string_list refs_to_delete = STRING_LIST_INIT_DUP;
 	struct string_list_item *item;
 	int branch_name_pos;
@@ -257,7 +259,7 @@ static int delete_branches(int argc, const char **argv, int force, int kinds,
 		char *target = NULL;
 		int flags = 0;
 
-		strbuf_branchname(&bname, argv[i], allowed_interpret);
+		copy_branchname(&bname, argv[i], allowed_interpret);
 		free(name);
 		name = mkpathdup(fmt, bname.buf);
 
@@ -471,7 +473,7 @@ static void print_ref_list(struct ref_filter *filter, struct ref_sorting *sortin
 	if (verify_ref_format(format))
 		die(_("unable to parse format string"));
 
-	filter_ahead_behind(the_repository, format, &array);
+	filter_ahead_behind(the_repository, &array);
 	ref_array_sort(sorting, &array);
 
 	if (column_active(colopts)) {
@@ -579,7 +581,7 @@ static void copy_or_rename_branch(const char *oldname, const char *newname, int 
 	int recovery = 0, oldref_usage = 0;
 	struct worktree **worktrees = get_worktrees();
 
-	if (strbuf_check_branch_ref(&oldref, oldname)) {
+	if (check_branch_ref(&oldref, oldname)) {
 		/*
 		 * Bad name --- this could be an attempt to rename a
 		 * ref that we used to allow to be created by accident.
@@ -589,7 +591,7 @@ static void copy_or_rename_branch(const char *oldname, const char *newname, int 
 		else {
 			int code = die_message(_("invalid branch name: '%s'"), oldname);
 			advise_if_enabled(ADVICE_REF_SYNTAX,
-					  _("See `man git check-ref-format`"));
+					  _("See 'git help check-ref-format'"));
 			exit(code);
 		}
 	}
@@ -697,14 +699,17 @@ static int edit_branch_description(const char *branch_name)
 
 	strbuf_addf(&name, "branch.%s.description", branch_name);
 	if (buf.len || exists)
-		git_config_set(name.buf, buf.len ? buf.buf : NULL);
+		repo_config_set(the_repository, name.buf, buf.len ? buf.buf : NULL);
 	strbuf_release(&name);
 	strbuf_release(&buf);
 
 	return 0;
 }
 
-int cmd_branch(int argc, const char **argv, const char *prefix)
+int cmd_branch(int argc,
+	       const char **argv,
+	       const char *prefix,
+	       struct repository *repo UNUSED)
 {
 	/* possible actions */
 	int delete = 0, rename = 0, copy = 0, list = 0,
@@ -719,6 +724,8 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 	static struct ref_sorting *sorting;
 	struct string_list sorting_options = STRING_LIST_INIT_DUP;
 	struct ref_format format = REF_FORMAT_INIT;
+	struct repo_config_values *cfg = repo_config_values(the_repository);
+	int ret;
 
 	struct option options[] = {
 		OPT_GROUP(N_("Generic options")),
@@ -778,18 +785,18 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 	filter.kind = FILTER_REFS_BRANCHES;
 	filter.abbrev = -1;
 
-	if (argc == 2 && !strcmp(argv[1], "-h"))
-		usage_with_options(builtin_branch_usage, options);
+	show_usage_with_options_if_asked(argc, argv,
+					 builtin_branch_usage, options);
 
 	/*
 	 * Try to set sort keys from config. If config does not set any,
 	 * fall back on default (refname) sorting.
 	 */
-	git_config(git_branch_config, &sorting_options);
+	repo_config(the_repository, git_branch_config, &sorting_options);
 	if (!sorting_options.nr)
 		string_list_append(&sorting_options, "refname");
 
-	track = git_branch_track;
+	track = cfg->branch_track;
 
 	head = refs_resolve_refdup(get_main_ref_store(the_repository), "HEAD",
 				   0, &head_oid, NULL);
@@ -848,15 +855,15 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 	if (list)
 		setup_auto_pager("branch", 1);
 
-	UNLEAK(sorting_options);
-
 	if (delete) {
 		if (!argc)
 			die(_("branch name required"));
-		return delete_branches(argc, argv, delete > 1, filter.kind, quiet);
+		ret = delete_branches(argc, argv, delete > 1, filter.kind, quiet);
+		goto out;
 	} else if (show_current) {
 		print_current_branch_name();
-		return 0;
+		ret = 0;
+		goto out;
 	} else if (list) {
 		/*  git branch --list also shows HEAD when it is detached */
 		if ((filter.kind & FILTER_REFS_BRANCHES) && filter.detached)
@@ -878,37 +885,42 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 		string_list_clear(&output, 0);
 		ref_sorting_release(sorting);
 		ref_filter_clear(&filter);
-		return 0;
+
+		ret = 0;
+		goto out;
 	} else if (edit_description) {
 		const char *branch_name;
 		struct strbuf branch_ref = STRBUF_INIT;
 		struct strbuf buf = STRBUF_INIT;
-		int ret = 1; /* assume failure */
 
 		if (!argc) {
 			if (filter.detached)
 				die(_("cannot give description to detached HEAD"));
 			branch_name = head;
 		} else if (argc == 1) {
-			strbuf_branchname(&buf, argv[0], INTERPRET_BRANCH_LOCAL);
+			copy_branchname(&buf, argv[0], INTERPRET_BRANCH_LOCAL);
 			branch_name = buf.buf;
 		} else {
 			die(_("cannot edit description of more than one branch"));
 		}
 
 		strbuf_addf(&branch_ref, "refs/heads/%s", branch_name);
-		if (!refs_ref_exists(get_main_ref_store(the_repository), branch_ref.buf))
+		if (!refs_ref_exists(get_main_ref_store(the_repository), branch_ref.buf)) {
 			error((!argc || branch_checked_out(branch_ref.buf))
 			      ? _("no commit on branch '%s' yet")
 			      : _("no branch named '%s'"),
 			      branch_name);
-		else if (!edit_branch_description(branch_name))
+			ret = 1;
+		} else if (!edit_branch_description(branch_name)) {
 			ret = 0; /* happy */
+		} else {
+			ret = 1;
+		}
 
 		strbuf_release(&branch_ref);
 		strbuf_release(&buf);
 
-		return ret;
+		goto out;
 	} else if (copy || rename) {
 		if (!argc)
 			die(_("branch name required"));
@@ -929,7 +941,7 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 		if (!argc)
 			branch = branch_get(NULL);
 		else if (argc == 1) {
-			strbuf_branchname(&buf, argv[0], INTERPRET_BRANCH_LOCAL);
+			copy_branchname(&buf, argv[0], INTERPRET_BRANCH_LOCAL);
 			branch = branch_get(buf.buf);
 		} else
 			die(_("too many arguments to set new upstream"));
@@ -959,7 +971,7 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 		if (!argc)
 			branch = branch_get(NULL);
 		else if (argc == 1) {
-			strbuf_branchname(&buf, argv[0], INTERPRET_BRANCH_LOCAL);
+			copy_branchname(&buf, argv[0], INTERPRET_BRANCH_LOCAL);
 			branch = branch_get(buf.buf);
 		} else
 			die(_("too many arguments to unset upstream"));
@@ -976,10 +988,10 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 
 		strbuf_reset(&buf);
 		strbuf_addf(&buf, "branch.%s.remote", branch->name);
-		git_config_set_multivar(buf.buf, NULL, NULL, CONFIG_FLAGS_MULTI_REPLACE);
+		repo_config_set_multivar(the_repository, buf.buf, NULL, NULL, CONFIG_FLAGS_MULTI_REPLACE);
 		strbuf_reset(&buf);
 		strbuf_addf(&buf, "branch.%s.merge", branch->name);
-		git_config_set_multivar(buf.buf, NULL, NULL, CONFIG_FLAGS_MULTI_REPLACE);
+		repo_config_set_multivar(the_repository, buf.buf, NULL, NULL, CONFIG_FLAGS_MULTI_REPLACE);
 		strbuf_release(&buf);
 	} else if (!noncreate_actions && argc > 0 && argc <= 2) {
 		const char *branch_name = argv[0];
@@ -996,12 +1008,17 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 			create_branches_recursively(the_repository, branch_name,
 						    start_name, NULL, force,
 						    reflog, quiet, track, 0);
-			return 0;
+			ret = 0;
+			goto out;
 		}
 		create_branch(the_repository, branch_name, start_name, force, 0,
 			      reflog, quiet, track, 0);
 	} else
 		usage_with_options(builtin_branch_usage, options);
 
-	return 0;
+	ret = 0;
+
+out:
+	string_list_clear(&sorting_options, 0);
+	return ret;
 }

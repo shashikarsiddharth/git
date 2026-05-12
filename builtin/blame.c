@@ -5,14 +5,14 @@
  * See COPYING for licensing conditions
  */
 
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "builtin.h"
 #include "config.h"
 #include "color.h"
-#include "builtin.h"
 #include "environment.h"
 #include "gettext.h"
 #include "hex.h"
-#include "repository.h"
 #include "commit.h"
 #include "diff.h"
 #include "revision.h"
@@ -27,7 +27,7 @@
 #include "line-log.h"
 #include "progress.h"
 #include "object-name.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "pager.h"
 #include "blame.h"
 #include "refs.h"
@@ -35,17 +35,17 @@
 #include "tag.h"
 #include "write-or-die.h"
 
-static char blame_usage[] = N_("git blame [<options>] [<rev-opts>] [<rev>] [--] <file>");
-static char annotate_usage[] = N_("git annotate [<options>] [<rev-opts>] [<rev>] [--] <file>");
+static const char blame_usage[] = N_("git blame [<options>] [<rev-opts>] [<rev>] [--] <file>");
+static const char annotate_usage[] = N_("git annotate [<options>] [<rev-opts>] [<rev>] [--] <file>");
 
-static const char *blame_opt_usage[] = {
+static const char *const blame_opt_usage[] = {
 	blame_usage,
 	"",
 	N_("<rev-opts> are documented in git-rev-list(1)"),
 	NULL
 };
 
-static const char *annotate_opt_usage[] = {
+static const char *const annotate_opt_usage[] = {
 	annotate_usage,
 	"",
 	N_("<rev-opts> are documented in git-rev-list(1)"),
@@ -196,9 +196,7 @@ static void commit_info_destroy(struct commit_info *ci)
 	strbuf_release(&ci->summary);
 }
 
-static void get_commit_info(struct commit *commit,
-			    struct commit_info *ret,
-			    int detailed)
+static void get_commit_info(struct commit *commit, struct commit_info *ret)
 {
 	int len;
 	const char *subject, *encoding;
@@ -209,11 +207,6 @@ static void get_commit_info(struct commit *commit,
 	get_ac_line(message, "\nauthor ",
 		    &ret->author, &ret->author_mail,
 		    &ret->author_time, &ret->author_tz);
-
-	if (!detailed) {
-		repo_unuse_commit_buffer(the_repository, commit, message);
-		return;
-	}
 
 	get_ac_line(message, "\ncommitter ",
 		    &ret->committer, &ret->committer_mail,
@@ -262,7 +255,7 @@ static int emit_one_suspect_detail(struct blame_origin *suspect, int repeat)
 		return 0;
 
 	suspect->commit->object.flags |= METAINFO_SHOWN;
-	get_commit_info(suspect->commit, &ci, 1);
+	get_commit_info(suspect->commit, &ci);
 	printf("author %s\n", ci.author.buf);
 	printf("author-mail %s\n", ci.author_mail.buf);
 	printf("author-time %"PRItime"\n", ci.author_time);
@@ -350,6 +343,19 @@ static void emit_porcelain_details(struct blame_origin *suspect, int repeat)
 		write_filename_info(suspect);
 }
 
+/*
+ * Information which needs to be printed per-line goes here. Any
+ * information which can be clubbed on a commit/file level, should
+ * be printed via 'emit_one_suspect_detail()'.
+ */
+static void emit_porcelain_per_line_details(struct blame_entry *ent)
+{
+	if (mark_unblamable_lines && ent->unblamable)
+		puts("unblamable");
+	if (mark_ignored_lines && ent->ignored)
+		puts("ignored");
+}
+
 static void emit_porcelain(struct blame_scoreboard *sb, struct blame_entry *ent,
 			   int opt)
 {
@@ -366,6 +372,7 @@ static void emit_porcelain(struct blame_scoreboard *sb, struct blame_entry *ent,
 	       ent->lno + 1,
 	       ent->num_lines);
 	emit_porcelain_details(suspect, repeat);
+	emit_porcelain_per_line_details(ent);
 
 	cp = blame_nth_line(sb, ent->lno);
 	for (cnt = 0; cnt < ent->num_lines; cnt++) {
@@ -376,6 +383,7 @@ static void emit_porcelain(struct blame_scoreboard *sb, struct blame_entry *ent,
 			       ent->lno + 1 + cnt);
 			if (repeat)
 				emit_porcelain_details(suspect, 1);
+			emit_porcelain_per_line_details(ent);
 		}
 		putchar('\t');
 		do {
@@ -404,7 +412,7 @@ static void parse_color_fields(const char *s)
 	colorfield_nr = 0;
 
 	/* Ideally this would be stripped and split at the same time? */
-	string_list_split(&l, s, ',', -1);
+	string_list_split(&l, s, ",", -1);
 	ALLOC_GROW(colorfield, colorfield_nr + 1, colorfield_alloc);
 
 	for_each_string_list_item(item, &l) {
@@ -445,7 +453,8 @@ static void determine_line_heat(struct commit_info *ci, const char **dest_color)
 	*dest_color = colorfield[i].col;
 }
 
-static void emit_other(struct blame_scoreboard *sb, struct blame_entry *ent, int opt)
+static void emit_other(struct blame_scoreboard *sb, struct blame_entry *ent,
+		       int opt, struct blame_entry *prev_ent)
 {
 	int cnt;
 	const char *cp;
@@ -455,7 +464,7 @@ static void emit_other(struct blame_scoreboard *sb, struct blame_entry *ent, int
 	int show_raw_time = !!(opt & OUTPUT_RAW_TIMESTAMP);
 	const char *default_color = NULL, *color = NULL, *reset = NULL;
 
-	get_commit_info(suspect->commit, &ci, 1);
+	get_commit_info(suspect->commit, &ci);
 	oid_to_hex_r(hex, &suspect->commit->object.oid);
 
 	cp = blame_nth_line(sb, ent->lno);
@@ -466,12 +475,20 @@ static void emit_other(struct blame_scoreboard *sb, struct blame_entry *ent, int
 		reset = GIT_COLOR_RESET;
 	}
 
+	if (abbrev < MINIMUM_ABBREV)
+		BUG("abbreviation is smaller than minimum length: %d < %d",
+		    abbrev, MINIMUM_ABBREV);
+
 	for (cnt = 0; cnt < ent->num_lines; cnt++) {
 		char ch;
-		int length = (opt & OUTPUT_LONG_OBJECT_NAME) ? the_hash_algo->hexsz : abbrev;
+		size_t length = (opt & OUTPUT_LONG_OBJECT_NAME) ?
+			the_hash_algo->hexsz : (size_t) abbrev;
 
 		if (opt & OUTPUT_COLOR_LINE) {
-			if (cnt > 0) {
+			if (cnt > 0 ||
+			    (prev_ent &&
+			     oideq(&suspect->commit->object.oid,
+				   &prev_ent->suspect->commit->object.oid))) {
 				color = repeated_meta_color;
 				reset = GIT_COLOR_RESET;
 			} else  {
@@ -483,9 +500,9 @@ static void emit_other(struct blame_scoreboard *sb, struct blame_entry *ent, int
 			fputs(color, stdout);
 
 		if (suspect->commit->object.flags & UNINTERESTING) {
-			if (blank_boundary)
-				memset(hex, ' ', length);
-			else if (!(opt & OUTPUT_ANNOTATE_COMPAT)) {
+			if (blank_boundary) {
+				memset(hex, ' ', strlen(hex));
+			} else if (!(opt & OUTPUT_ANNOTATE_COMPAT)) {
 				length--;
 				putchar('^');
 			}
@@ -499,7 +516,8 @@ static void emit_other(struct blame_scoreboard *sb, struct blame_entry *ent, int
 			length--;
 			putchar('?');
 		}
-		printf("%.*s", length, hex);
+
+		printf("%.*s", (int)(length < GIT_MAX_HEXSZ ? length : GIT_MAX_HEXSZ), hex);
 		if (opt & OUTPUT_ANNOTATE_COMPAT) {
 			const char *name;
 			if (opt & OUTPUT_SHOW_EMAIL)
@@ -556,7 +574,7 @@ static void emit_other(struct blame_scoreboard *sb, struct blame_entry *ent, int
 
 static void output(struct blame_scoreboard *sb, int option)
 {
-	struct blame_entry *ent;
+	struct blame_entry *ent, *prev_ent = NULL;
 
 	if (option & OUTPUT_PORCELAIN) {
 		for (ent = sb->ent; ent; ent = ent->next) {
@@ -578,7 +596,8 @@ static void output(struct blame_scoreboard *sb, int option)
 		if (option & OUTPUT_PORCELAIN)
 			emit_porcelain(sb, ent, option);
 		else {
-			emit_other(sb, ent, option);
+			emit_other(sb, ent, option, prev_ent);
+			prev_ent = ent;
 		}
 	}
 }
@@ -643,7 +662,7 @@ static void find_alignment(struct blame_scoreboard *sb, int *option)
 		if (!(suspect->commit->object.flags & METAINFO_SHOWN)) {
 			struct commit_info ci = COMMIT_INFO_INIT;
 			suspect->commit->object.flags |= METAINFO_SHOWN;
-			get_commit_info(suspect->commit, &ci, 1);
+			get_commit_info(suspect->commit, &ci);
 			if (*option & OUTPUT_SHOW_EMAIL)
 				num = utf8_strwidth(ci.author_mail.buf);
 			else
@@ -724,7 +743,8 @@ static int git_blame_config(const char *var, const char *value,
 		ret = git_config_pathname(&str, var, value);
 		if (ret)
 			return ret;
-		string_list_insert(&ignore_revs_file_list, str);
+		if (str)
+			string_list_insert(&ignore_revs_file_list, str);
 		free(str);
 		return 0;
 	}
@@ -762,6 +782,19 @@ static int git_blame_config(const char *var, const char *value,
 				"blame.coloring", value);
 			return 0;
 		}
+	}
+
+	if (!strcmp(var, "diff.algorithm")) {
+		long diff_algorithm;
+		if (!value)
+			return config_error_nonbool(var);
+		diff_algorithm = parse_algorithm_value(value);
+		if (diff_algorithm < 0)
+			return error(_("unknown value for config '%s': %s"),
+				     var, value);
+		xdl_opts &= ~XDF_DIFF_ALGORITHM_MASK;
+		xdl_opts |= diff_algorithm;
+		return 0;
 	}
 
 	if (git_diff_heuristic_config(var, value, cb) < 0)
@@ -809,13 +842,45 @@ static int blame_move_callback(const struct option *option, const char *arg, int
 	return 0;
 }
 
+static int blame_diff_algorithm_minimal(const struct option *option,
+					const char *arg, int unset)
+{
+	int *opt = option->value;
+
+	BUG_ON_OPT_ARG(arg);
+
+	*opt &= ~XDF_DIFF_ALGORITHM_MASK;
+	if (!unset)
+		*opt |= XDF_NEED_MINIMAL;
+
+	return 0;
+}
+
+static int blame_diff_algorithm_callback(const struct option *option,
+					 const char *arg, int unset)
+{
+	int *opt = option->value;
+	long value = parse_algorithm_value(arg);
+
+	BUG_ON_OPT_NEG(unset);
+
+	if (value < 0)
+		return error(_("option diff-algorithm accepts \"myers\", "
+			       "\"minimal\", \"patience\" and \"histogram\""));
+
+	*opt &= ~XDF_DIFF_ALGORITHM_MASK;
+	*opt |= value;
+
+	return 0;
+}
+
 static int is_a_rev(const char *name)
 {
 	struct object_id oid;
 
 	if (repo_get_oid(the_repository, name, &oid))
 		return 0;
-	return OBJ_NONE < oid_object_info(the_repository, &oid, NULL);
+	return OBJ_NONE < odb_read_object_info(the_repository->objects, &oid, NULL);
 }
 
 static int peel_to_commit_oid(struct object_id *oid_ret, void *cbdata)
@@ -826,7 +891,7 @@ static int peel_to_commit_oid(struct object_id *oid_ret, void *cbdata)
 	oidcpy(&oid, oid_ret);
 	while (1) {
 		struct object *obj;
-		int kind = oid_object_info(r, &oid, NULL);
+		int kind = odb_read_object_info(r->objects, &oid, NULL);
 		if (kind == OBJ_COMMIT) {
 			oidcpy(oid_ret, &oid);
 			return 0;
@@ -864,7 +929,10 @@ static void build_ignorelist(struct blame_scoreboard *sb,
 	}
 }
 
-int cmd_blame(int argc, const char **argv, const char *prefix)
+int cmd_blame(int argc,
+	      const char **argv,
+	      const char *prefix,
+	      struct repository *repo UNUSED)
 {
 	struct rev_info revs;
 	char *path = NULL;
@@ -897,11 +965,16 @@ int cmd_blame(int argc, const char **argv, const char *prefix)
 		OPT_BIT('s', NULL, &output_option, N_("suppress author name and timestamp (Default: off)"), OUTPUT_NO_AUTHOR),
 		OPT_BIT('e', "show-email", &output_option, N_("show author email instead of name (Default: off)"), OUTPUT_SHOW_EMAIL),
 		OPT_BIT('w', NULL, &xdl_opts, N_("ignore whitespace differences"), XDF_IGNORE_WHITESPACE),
+		OPT_CALLBACK_F(0, "diff-algorithm", &xdl_opts, N_("<algorithm>"),
+			       N_("choose a diff algorithm"),
+			       PARSE_OPT_NONEG, blame_diff_algorithm_callback),
 		OPT_STRING_LIST(0, "ignore-rev", &ignore_rev_list, N_("rev"), N_("ignore <rev> when blaming")),
 		OPT_STRING_LIST(0, "ignore-revs-file", &ignore_revs_file_list, N_("file"), N_("ignore revisions from <file>")),
 		OPT_BIT(0, "color-lines", &output_option, N_("color redundant metadata from previous line differently"), OUTPUT_COLOR_LINE),
 		OPT_BIT(0, "color-by-age", &output_option, N_("color lines by age"), OUTPUT_SHOW_AGE_WITH_COLOR),
-		OPT_BIT(0, "minimal", &xdl_opts, N_("spend extra cycles to find better match"), XDF_NEED_MINIMAL),
+		OPT_CALLBACK_F(0, "minimal", &xdl_opts, NULL,
+			       N_("spend extra cycles to find a better match"),
+			       PARSE_OPT_NOARG | PARSE_OPT_HIDDEN, blame_diff_algorithm_minimal),
 		OPT_STRING('S', NULL, &revs_file, N_("file"), N_("use revisions from <file> instead of calling git-rev-list")),
 		OPT_STRING(0, "contents", &contents_from, N_("file"), N_("use <file>'s contents as the final image")),
 		OPT_CALLBACK_F('C', NULL, &opt, N_("score"), N_("find line copies within and across files"), PARSE_OPT_OPTARG, blame_copy_callback),
@@ -919,10 +992,10 @@ int cmd_blame(int argc, const char **argv, const char *prefix)
 	long anchor;
 	long num_lines = 0;
 	const char *str_usage = cmd_is_annotate ? annotate_usage : blame_usage;
-	const char **opt_usage = cmd_is_annotate ? annotate_opt_usage : blame_opt_usage;
+	const char *const *opt_usage = cmd_is_annotate ? annotate_opt_usage : blame_opt_usage;
 
 	setup_default_color_by_age();
-	git_config(git_blame_config, &output_option);
+	repo_config(the_repository, git_blame_config, &output_option);
 	repo_init_revisions(the_repository, &revs, NULL);
 	revs.date_mode = blame_date_mode;
 	revs.diffopt.flags.allow_textconv = 1;
@@ -1081,7 +1154,7 @@ parse_done:
 			path = add_prefix(prefix, argv[1]);
 			argv[1] = argv[2];
 		} else {	/* (2a) */
-			if (argc == 2 && is_a_rev(argv[1]) && !get_git_work_tree())
+			if (argc == 2 && is_a_rev(argv[1]) && !repo_get_work_tree(the_repository))
 				die("missing <path> to blame");
 			path = add_prefix(prefix, argv[argc - 1]);
 		}
@@ -1179,19 +1252,21 @@ parse_done:
 	sb.xdl_opts = xdl_opts;
 	sb.no_whole_file_rename = no_whole_file_rename;
 
-	read_mailmap(&mailmap);
+	read_mailmap(the_repository, &mailmap);
 
 	sb.found_guilty_entry = &found_guilty_entry;
 	sb.found_guilty_entry_data = &pi;
 	if (show_progress)
-		pi.progress = start_delayed_progress(_("Blaming lines"), num_lines);
+		pi.progress = start_delayed_progress(the_repository,
+						     _("Blaming lines"),
+						     num_lines);
 
 	assign_blame(&sb, opt);
 
 	stop_progress(&pi.progress);
 
 	if (!incremental)
-		setup_pager();
+		setup_pager(the_repository);
 	else
 		goto cleanup;
 
@@ -1214,12 +1289,6 @@ parse_done:
 		output_option &= ~(OUTPUT_COLOR_LINE | OUTPUT_SHOW_AGE_WITH_COLOR);
 
 	output(&sb, output_option);
-	free((void *)sb.final_buf);
-	for (ent = sb.ent; ent; ) {
-		struct blame_entry *e = ent->next;
-		free(ent);
-		ent = e;
-	}
 
 	if (show_stats) {
 		printf("num read blob: %d\n", sb.num_read_blob);
@@ -1228,6 +1297,12 @@ parse_done:
 	}
 
 cleanup:
+	for (ent = sb.ent; ent; ) {
+		struct blame_entry *e = ent->next;
+		free(ent);
+		ent = e;
+	}
+
 	free(path);
 	cleanup_scoreboard(&sb);
 	release_revisions(&revs);

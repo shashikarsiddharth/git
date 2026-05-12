@@ -2,7 +2,6 @@
 
 test_description='git p4 wildcards'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./lib-git-p4.sh
 
 test_expect_success 'start p4d' '
@@ -31,13 +30,13 @@ test_expect_success 'wildcard files git p4 clone' '
 	test_when_finished cleanup_git &&
 	(
 		cd "$git" &&
-		test -f file-wild#hash &&
+		test_path_is_file file-wild#hash &&
 		if test_have_prereq !MINGW,!CYGWIN
 		then
-			test -f file-wild\*star
+			test_path_is_file file-wild\*star
 		fi &&
-		test -f file-wild@at &&
-		test -f file-wild%percent
+		test_path_is_file file-wild@at &&
+		test_path_is_file file-wild%percent
 	)
 '
 

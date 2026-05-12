@@ -2,7 +2,6 @@
 
 test_description='split commit graph'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-chunk.sh
 
@@ -203,7 +202,7 @@ then
 	graph_git_behavior 'alternate: commit 13 vs 6' commits/13 origin/commits/6 "fork"
 fi
 
-test_expect_success 'test merge stragety constants' '
+test_expect_success 'test merge strategy constants' '
 	git clone . merge-2 &&
 	(
 		cd merge-2 &&
@@ -402,7 +401,7 @@ test_expect_success 'verify across alternates' '
 	)
 '
 
-test_expect_success 'reader bounds-checks base-graph chunk' '
+test_expect_success PERL_TEST_HELPERS 'reader bounds-checks base-graph chunk' '
 	git clone --no-hardlinks . corrupt-base-chunk &&
 	(
 		cd corrupt-base-chunk &&

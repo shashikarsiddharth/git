@@ -13,7 +13,6 @@ or warnings to log.'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./lib-gitweb.sh
 
 # ----------------------------------------------------------------------
@@ -701,19 +700,17 @@ test_expect_success \
 # ----------------------------------------------------------------------
 # syntax highlighting
 
+test_lazy_prereq HIGHLIGHT '
+	highlight_version=$(highlight --version </dev/null 2>/dev/null) &&
+	test -n "$highlight_version"
+'
 
-highlight_version=$(highlight --version </dev/null 2>/dev/null)
-if [ $? -eq 127 ]; then
-	say "Skipping syntax highlighting tests: 'highlight' not found"
-elif test -z "$highlight_version"; then
-	say "Skipping syntax highlighting tests: incorrect 'highlight' found"
-else
-	test_set_prereq HIGHLIGHT
+test_expect_success HIGHLIGHT '
 	cat >>gitweb_config.perl <<-\EOF
 	our $highlight_bin = "highlight";
-	$feature{'highlight'}{'override'} = 1;
+	$feature{"highlight"}{"override"} = 1;
 	EOF
-fi
+'
 
 test_expect_success HIGHLIGHT \
 	'syntax highlighting (no highlight, unknown syntax)' \

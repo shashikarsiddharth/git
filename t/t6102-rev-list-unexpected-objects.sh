@@ -2,8 +2,13 @@
 
 test_description='git rev-list should handle unexpected object types'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
+
+if ! test_have_prereq PERL_TEST_HELPERS
+then
+	skip_all='skipping rev-list unexpected objects tests; Perl not available'
+	test_done
+fi
 
 test_expect_success 'setup well-formed objects' '
 	blob="$(printf "foo" | git hash-object -w --stdin)" &&
